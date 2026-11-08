@@ -1,0 +1,10 @@
+{
+  "repository": "https://github.com/Alic-Li/rwkv_lightning_cuda",
+  "revision": "d54c53696ed57001ee80209847d6cef1cf54abb6",
+  "runUrl": "https://github.com/Alic-Li/rwkv_lightning_cuda/actions/runs/41310451826",
+  "artifactId": 13085436382,
+  "artifactName": "package-ubuntu-22.04-12.9.0",
+  "artifactSha256": "075317413d344edfc00e2af8eca6549a65de1da01c0c536680f750f26479143e",
+  "vocabSha256": "e6dee3d4e31b4d5c40ac99508ac6c701ceef4bed681bf2167ce9a908552bca89",
+  "tokenizerSourceSha256": "de8eb1a9fc7a7b7ae9330392d899620a69ef2376b699a50050963febedfcf27c"
+}

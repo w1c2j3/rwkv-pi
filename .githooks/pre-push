@@ -1,0 +1,14 @@
+#!/bin/sh
+set -eu
+# Inspect every ancestor of each pushed revision, including old-history merges.
+root=$(git rev-parse --show-toplevel)
+while read -r local_ref local_oid remote_ref remote_oid; do
+    case "$local_oid" in
+        0000000000000000000000000000000000000000) continue ;;
+    esac
+    case "$remote_ref" in
+        refs/heads/main|refs/heads/data) ;;
+        *) printf '%s\n' 'Only reviewed main/data branches may be pushed.' >&2; exit 1 ;;
+    esac
+    python3 -B "$root/scripts/check-code-only.py" --refs "$local_oid"
+done

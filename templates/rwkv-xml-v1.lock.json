@@ -1,0 +1,16 @@
+{
+  "schemaVersion": 1,
+  "profile": "xml",
+  "protocol": "rwkv-xml-v1",
+  "sha256": "578a37fb9567e6de7720aed2a0b842795bca878e31e4631737ca9f08b3e81f7a",
+  "derivedFrom": {
+    "repository": "RWKV/RWKV7-G1l-13.3B-20261031",
+    "revision": "f981293bd2578d403a8f1d6c5895f1f9b1663e87",
+    "source": "https://huggingface.co/RWKV/RWKV7-G1l-13.3B-20261031/blob/f981293bd2578d403a8f1d6c5895f1f9b1663e87/chat_template.jinja",
+    "sha256": "c16f69e123db081df35639bf95fa0b4689ebd8325b0c52434299926c8b21ff71",
+    "license": "Apache-2.0",
+    "modifications": "None; source bytes preserved. Runtime kwargs set bos_token to an empty string to match the source tokenizer (bos_token=null), and pass thinking explicitly."
+  },
+  "formatSource": "https://huggingface.co/BlinkDL/rwkv7-g1/blob/main/README.md",
+  "modifications": "Project XML tool instructions, singular tool_call envelopes, tool_response observations. Role and thinking prefixes retained. Tool response content is not trimmed."
+}

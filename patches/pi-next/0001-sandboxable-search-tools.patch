@@ -1,0 +1,83 @@
+diff --git a/packages/coding-agent/src/core/tools/find.ts b/packages/coding-agent/src/core/tools/find.ts
+index 77ba1b3..c96a97f 100644
+--- a/packages/coding-agent/src/core/tools/find.ts
++++ b/packages/coding-agent/src/core/tools/find.ts
+@@ -1,6 +1,7 @@
+ import { createInterface } from "node:readline";
+-import { spawn } from "child_process";
++import { type ChildProcessByStdio, spawn } from "child_process";
+ import path from "path";
++import type { Readable } from "stream";
+ import { type Static, Type } from "typebox";
+ import { ensureTool } from "../../utils/tools-manager.ts";
+ import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+@@ -53,6 +54,8 @@ export interface FindOperations {
+ 	exists: (absolutePath: string) => Promise<boolean> | boolean;
+ 	/** Find files matching glob pattern. Returns relative or absolute paths. */
+ 	glob: (pattern: string, cwd: string, options: { ignore: string[]; limit: number }) => Promise<string[]> | string[];
++	/** Start fd when glob() is not provided, for example inside an isolated environment. Default: spawn on the local host. */
++	spawn?: (command: string, args: string[]) => ChildProcessByStdio<null, Readable, Readable>;
+ }
+ 
+ const defaultFindOperations: FindOperations = {
+@@ -111,8 +114,8 @@ export function createFindToolDefinition(
+ 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
+ 						const ops = customOps ?? defaultFindOperations;
+ 
+-						// If custom operations provide glob(), use that instead of fd.
+-						if (customOps?.glob) {
++						// If custom operations provide glob() without spawn(), use that instead of fd.
++						if (customOps?.glob && !customOps.spawn) {
+ 							if (!(await ops.exists(searchPath))) {
+ 								settle(() => reject(new Error(`Path not found: ${searchPath}`)));
+ 								return;
+@@ -186,7 +189,7 @@ export function createFindToolDefinition(
+ 						// https://github.com/earendil-works/pi/issues/5960
+ 						let insideGitRepo = false;
+ 						for (let current = searchPath; ; ) {
+-							if (await pathExists(path.join(current, ".git"))) {
++							if (await ops.exists(path.join(current, ".git"))) {
+ 								insideGitRepo = true;
+ 								break;
+ 							}
+@@ -212,7 +215,7 @@ export function createFindToolDefinition(
+ 						}
+ 						args.push("--", effectivePattern, searchPath);
+ 
+-						const child = spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
++						const child = customOps?.spawn ? customOps.spawn(fdPath, args) : spawn(fdPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+ 						const rl = createInterface({ input: child.stdout });
+ 						let stderr = "";
+ 						const lines: string[] = [];
+diff --git a/packages/coding-agent/src/core/tools/grep.ts b/packages/coding-agent/src/core/tools/grep.ts
+index e449e08..a97db84 100644
+--- a/packages/coding-agent/src/core/tools/grep.ts
++++ b/packages/coding-agent/src/core/tools/grep.ts
+@@ -1,7 +1,8 @@
+ import { readFile as fsReadFile, stat as fsStat } from "node:fs/promises";
+ import { createInterface } from "node:readline";
+-import { spawn } from "child_process";
++import { type ChildProcessByStdio, spawn } from "child_process";
+ import path from "path";
++import type { Readable } from "stream";
+ import { type Static, Type } from "typebox";
+ import { ensureTool } from "../../utils/tools-manager.ts";
+ import type { ExtensionContext, ToolDefinition } from "../extensions/types.ts";
+@@ -54,6 +55,8 @@ export interface GrepOperations {
+ 	isDirectory: (absolutePath: string) => Promise<boolean> | boolean;
+ 	/** Read file contents for context lines */
+ 	readFile: (absolutePath: string) => Promise<string> | string;
++	/** Start ripgrep, for example inside an isolated environment. Default: spawn on the local host. */
++	spawn?: (command: string, args: string[]) => ChildProcessByStdio<null, Readable, Readable>;
+ }
+ 
+ const defaultGrepOperations: GrepOperations = {
+@@ -166,7 +169,7 @@ export function createGrepToolDefinition(
+ 						if (glob) args.push("--glob", glob);
+ 						args.push("--", pattern, searchPath);
+ 
+-						const child = spawn(rgPath, args, { stdio: ["ignore", "pipe", "pipe"] });
++						const child = ops.spawn ? ops.spawn(rgPath, args) : spawn(rgPath, args, { stdio: ["ignore", "pipe", "pipe"] });
+ 						const rl = createInterface({ input: child.stdout });
+ 						let stderr = "";
+ 						let matchCount = 0;

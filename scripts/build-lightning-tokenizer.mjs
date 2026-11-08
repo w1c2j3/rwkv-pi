@@ -1,0 +1,13 @@
+import { execFileSync } from "node:child_process";
+import { readFile, writeFile, mkdir } from "node:fs/promises";
+import { sha256 } from "../dist/provenance.js";
+const lock = JSON.parse(await readFile("lightning-source.lock.json", "utf8"));
+const root = ".upstream/rwkv-lightning";
+const revision = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+const sourceSha256 = sha256(await readFile(root + "/src/utils/trie.h"));
+if (revision !== lock.revision || sourceSha256 !== lock.tokenizerSourceSha256) throw Error("Upstream tokenizer identity mismatch.");
+await mkdir("artifacts/lightning-migration", { recursive: true });
+const path = "artifacts/lightning-migration/tokenize-native";
+execFileSync("g++", ["-std=c++17", "-O2", "-I" + root + "/src", "scripts/tokenize-native.cpp", "-o", path], { stdio: "inherit" });
+await writeFile(path + ".json", JSON.stringify({ engineRevision: revision, sourceSha256, wrapperSha256: sha256(await readFile("scripts/tokenize-native.cpp")), binarySha256: sha256(await readFile(path)) }, null, 2) + "\n");
+console.log(path);

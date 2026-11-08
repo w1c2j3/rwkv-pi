@@ -1,0 +1,58 @@
+{
+  "name": "rwkv-pi",
+  "version": "0.1.0",
+  "private": true,
+  "description": "RWKV Lightning CUDA continuation client for the pi coding agent.",
+  "type": "module",
+  "bin": {
+    "rwkv-pi": "dist/cli.js"
+  },
+  "exports": {
+    ".": {
+      "types": "./dist/provider.d.ts",
+      "import": "./dist/provider.js"
+    }
+  },
+  "files": [
+    "dist",
+    "README.md",
+    ".env.example"
+  ],
+  "pi": {
+    "extensions": [
+      "./dist/extension.js"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "start": "node dist/cli.js",
+    "start:source": "node scripts/run-pi-source.mjs dist/cli.js",
+    "pi:setup": "node scripts/setup-pi-source.mjs",
+    "harness": "node dist/harness-cli.js",
+    "harness:source": "node scripts/run-pi-source.mjs dist/harness-cli.js",
+    "collab": "node scripts/run-pi-source.mjs dist/collaboration-cli.js",
+    "dataset": "node dist/dataset-cli.js",
+    "tokenize": "node pipeline/compile-lightning-dataset.mjs",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "prepare": "npm run build",
+    "lightning:tokenizer": "node scripts/build-lightning-tokenizer.mjs",
+    "lightning:setup": "npm run build && node scripts/setup-lightning.mjs",
+    "test": "npm run build && node --test test/config.test.mjs",
+    "privacy:check": "python3 -B scripts/check-code-only.py --refs HEAD"
+  },
+  "engines": {
+    "node": ">=22.19.0"
+  },
+  "dependencies": {
+    "@earendil-works/pi-ai": "1.5.0",
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@earendil-works/pi-schema": "1.5.0",
+    "ajv": "8.18.0",
+    "jsonc-parser": "3.3.1",
+    "undici": "8.12.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.19.0",
+    "typescript": "~5.9.3"
+  }
+}

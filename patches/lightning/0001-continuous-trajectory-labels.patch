@@ -1,0 +1,206 @@
+--- a/src/state_tuning/dataset.hpp
++++ b/src/state_tuning/dataset.hpp
+@@ -13,6 +13,8 @@
+ struct TextSegment {
+   std::string text;
+   bool train = true;
++  // Optional training label after this segment; never inserted into inputs.
++  int end_target = -1;
+ };
+ 
+ class JsonlTextReader {
+--- a/src/state_tuning/dataset.cpp
++++ b/src/state_tuning/dataset.cpp
+@@ -140,6 +140,7 @@
+   expect(line, at, '{', "segment must be an object");
+   bool has_text = false;
+   bool has_train = false;
++  bool has_end_target = false;
+   TextSegment segment;
+   while (true) {
+     const std::string key = json_string(line, at);
+@@ -150,9 +151,13 @@
+     } else if (key == "train" && !has_train) {
+       segment.train = json_bool(line, at);
+       has_train = true;
++    } else if (key == "end_target" && !has_end_target) {
++      if (at >= line.size() || line[at++] != '0')
++        throw std::runtime_error("end_target must be EOS token 0");
++      segment.end_target = 0;
++      has_end_target = true;
+     } else {
+-      throw std::runtime_error(
+-          "segment must contain exactly one text and one train field");
++      throw std::runtime_error("unknown or duplicate segment field");
+     }
+     whitespace(line, at);
+     if (at < line.size() && line[at] == ',') {
+@@ -164,6 +169,8 @@
+   }
+   if (!has_text || !has_train)
+     throw std::runtime_error("segment requires both text and train");
++  if (has_end_target && (!segment.train || segment.text.empty()))
++    throw std::runtime_error("end_target requires a nonempty trained segment");
+   return segment;
+ }
+ 
+@@ -232,7 +239,7 @@
+   std::vector<TextSegment> segments;
+   if (!next(segments))
+     return false;
+-  if (segments.size() != 1 || !segments[0].train)
++  if (segments.size() != 1 || !segments[0].train || segments[0].end_target != -1)
+     throw std::runtime_error(path_ + ":" + std::to_string(line_number_) +
+                              ": expected a plain text row");
+   text = std::move(segments[0].text);
+--- a/src/app/rwkv_tune.cpp
++++ b/src/app/rwkv_tune.cpp
+@@ -51,6 +51,7 @@
+ // because the tuned initial state receives its gradient through them.
+ struct Sample {
+   std::vector<int> tokens;
++  std::vector<int> labels;
+   std::vector<unsigned char> train;
+ };
+ 
+@@ -517,15 +518,25 @@
+           // Segments are tokenized independently so the mask follows their
+           // boundaries exactly.
+           Sample sample;
++          std::vector<std::size_t> eos_positions;
+           for (const auto &segment : segments) {
+             const auto encoded = tokenizer.encode(segment.text);
+             sample.tokens.insert(sample.tokens.end(), encoded.begin(),
+                                  encoded.end());
+             sample.train.insert(sample.train.end(), encoded.size(),
+                                 segment.train ? 1 : 0);
++            if (segment.end_target == 0) eos_positions.push_back(sample.tokens.size());
+           }
+-          std::size_t count = std::min(
+-              sample.tokens.size(), static_cast<std::size_t>(options.ctx) + 1);
++          sample.labels = sample.tokens;
++          for (const auto position : eos_positions) {
++            if (position >= sample.tokens.size() || sample.train[position])
++              throw std::runtime_error("EOS label collides with trained input or missing boundary");
++            sample.labels[position] = 0;
++            sample.train[position] = 1;
++          }
++          if (sample.tokens.size() > static_cast<std::size_t>(options.ctx) + 1)
++            throw std::runtime_error("Training row exceeds ctx; use a longer context bucket (truncation forbidden)");
++          std::size_t count = sample.tokens.size();
+           // Positions after the last trained target carry no gradient.
+           while (count >= 2 && !sample.train[count - 1])
+             --count;
+@@ -534,6 +545,7 @@
+             continue;
+           }
+           sample.tokens.resize(count);
++          sample.labels.resize(count);
+           sample.train.resize(count);
+           batch_tokens += static_cast<std::size_t>(
+               std::count(sample.train.begin() + 1, sample.train.end(), 1));
+@@ -584,16 +596,17 @@
+             const auto &sample = batch[first];
+             std::vector<float> weights(sample.train.begin(), sample.train.end());
+             batch_loss += executor.backward(frozen, sample.tokens, weights,
+-                                             time_state.p, batch_tokens);
++                                             time_state.p, batch_tokens, 1.0f, &sample.labels);
+           } else {
+-            std::vector<std::vector<int>> tokens;
++            std::vector<std::vector<int>> tokens, labels;
+             std::vector<std::vector<float>> weights;
+             for (std::size_t i = first; i < last; ++i) {
+               tokens.push_back(batch[i].tokens);
++              labels.push_back(batch[i].labels);
+               weights.emplace_back(batch[i].train.begin(), batch[i].train.end());
+             }
+             batch_loss += executor.backward_packed(frozen, tokens, weights,
+-                                                    time_state.p, batch_tokens);
++                                                    time_state.p, batch_tokens, 1.0f, &labels);
+           }
+ #if !defined(RWKV_MISS_TUNE) && !defined(RWKV_NORA_TUNE)
+ #ifdef RWKV_NCCL_DP
+--- a/include/rwkv/bf16_training/executor.hpp
++++ b/include/rwkv/bf16_training/executor.hpp
+@@ -42,7 +42,8 @@
+   // signed sum of advantages. The initial-state gradient remains available.
+   float backward(const FrozenModelView &, const std::vector<int> &tokens,
+                  const std::vector<float> &weights, const float *initial,
+-                 size_t normalizer, float temperature = 1.0f);
++                 size_t normalizer, float temperature = 1.0f,
++                 const std::vector<int> *label_ids = nullptr);
+   // Teacher-forced log softmax(logits / temperature) of tokens[i + 1] given
+   // tokens[0..i], for every i: tokens.size() - 1 values. Starts from
+   // `initial` with zero shifts and uses the same forward as backward().
+@@ -55,7 +56,8 @@
+                         const std::vector<std::vector<int>> &tokens,
+                         const std::vector<std::vector<float>> &weights,
+                         const float *initial, size_t normalizer,
+-                        float temperature = 1.0f);
++                        float temperature = 1.0f,
++                        const std::vector<std::vector<int>> *label_ids = nullptr);
+   std::vector<float> score(const FrozenModelView &,
+                            const std::vector<int> &tokens, const float *initial,
+                            float temperature = 1.0f);
+--- a/src/training/executor.cpp
++++ b/src/training/executor.cpp
+@@ -322,7 +322,7 @@
+                          const std::vector<int> &tokens,
+                          const std::vector<float> &weights,
+                          const float *initial, size_t normalizer,
+-                         float temperature) {
++                         float temperature, const std::vector<int> *label_ids) {
+   auto &w = *impl_;
+   w.single_lane();
+   if (tokens.size() < 2 || weights.size() != tokens.size() || !normalizer ||
+@@ -331,6 +331,11 @@
+   for (size_t i = 0; i < tokens.size(); ++i)
+     if (tokens[i] < 0 || tokens[i] >= w.V || !std::isfinite(weights[i]))
+       throw std::invalid_argument("invalid backward token/weight");
++  if (label_ids) {
++    if (label_ids->size() != tokens.size()) throw std::invalid_argument("label size mismatch");
++    for (const int id : *label_ids) if (id < 0 || id >= w.V) throw std::invalid_argument("invalid label id");
++  }
++  const auto &labels = label_ids ? *label_ids : tokens;
+   // A suffix after the last nonzero target has no loss and no terminal
+   // adjoint. Earlier masked context must still participate in full BPTT.
+   int length = int(tokens.size()) - 1;
+@@ -362,7 +367,7 @@
+     w.forward(m, tokens.data() + off, T,
+               supervised ? LogitsMode::All : LogitsMode::None);
+     if (supervised) {
+-      gpu_check(cudaMemcpyAsync(w.targets.p, tokens.data() + off + 1,
++      gpu_check(cudaMemcpyAsync(w.targets.p, labels.data() + off + 1,
+                                 T * sizeof(int), cudaMemcpyHostToDevice,
+                                 w.stream),
+                 "upload targets");
+@@ -404,12 +409,19 @@
+                                 const std::vector<std::vector<int>> &tokens,
+                                 const std::vector<std::vector<float>> &weights,
+                                 const float *initial, size_t normalizer,
+-                                float temperature) {
++                                float temperature, const std::vector<std::vector<int>> *label_ids) {
+   auto &w = *impl_;
+   const int n = int(tokens.size());
+   if (n < 1 || n > w.B || weights.size() != tokens.size() || !normalizer ||
+       !std::isfinite(temperature) || temperature <= 0)
+     throw std::invalid_argument("packed backward samples/normalizer");
++  if (label_ids) {
++    if (label_ids->size() != tokens.size()) throw std::invalid_argument("packed label size mismatch");
++    for (size_t b = 0; b < tokens.size(); ++b) {
++      if ((*label_ids)[b].size() != tokens[b].size()) throw std::invalid_argument("packed label length mismatch");
++      for (const int id : (*label_ids)[b]) if (id < 0 || id >= w.V) throw std::invalid_argument("invalid packed label id");
++    }
++  }
+   // Per lane, the same trimmed length as backward(): positions after the last
+   // weighted target carry neither loss nor adjoint.
+   std::vector<int> length(w.B, 0);
+@@ -458,7 +470,7 @@
+         if (inputs)
+           inputs->push_back(tokens[b][t]);
+         if (targets) {
+-          targets->push_back(tokens[b][t + 1]);
++          targets->push_back(label_ids ? (*label_ids)[b][t + 1] : tokens[b][t + 1]);
+           row_weights->push_back(lane_scale * weights[b][t + 1]);
+         }
+       }
