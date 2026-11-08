@@ -175,6 +175,18 @@ class PipelineTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "Release exists"):
             prepare_release(catalog, reviews, output)
 
+    def test_release_review_digest_binds_exported_serialization(self):
+        catalog, reviews, decisions, _, _ = self.reviewed()
+        reviews.write_text(json.dumps(decisions, ensure_ascii=False, indent=7) + "\n")
+        original = sha256_file(reviews)
+        output = self.root / "release"
+        result = prepare_release(catalog, reviews, output)
+        exported = output / "semantic-reviews.json"
+        self.assertEqual(json.loads(exported.read_text()), decisions)
+        self.assertEqual(result["sourceReviewSha256"], original)
+        self.assertEqual(result["reviewSha256"], sha256_file(exported))
+        self.assertNotEqual(result["reviewSha256"], original)
+
     def test_changed_object_evidence_or_holdout_invalidates_release(self):
         catalog, reviews, _, evidence, _ = self.reviewed()
         evidence.write_text(evidence.read_text() + "\n")

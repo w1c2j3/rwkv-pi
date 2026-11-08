@@ -257,6 +257,10 @@ def prepare_release(catalog_path, reviews_path, destination):
             "newTrainingTrajectories": 0,
         }
         write_json(staging / "semantic-reviews.json", decisions)
+        # Bind the hand-off to the exact bytes shipped in the release. The source
+        # review may use a different JSON serialization of the same decisions.
+        result["sourceReviewSha256"] = result["reviewSha256"]
+        result["reviewSha256"] = sha256_file(staging / "semantic-reviews.json")
         write_json(staging / "release.json", result)
         staging.rename(destination)
     except BaseException:
