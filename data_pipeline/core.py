@@ -235,14 +235,15 @@ def prepare_release(catalog_path, reviews_path, destination):
     staging = Path(tempfile.mkdtemp(prefix=".release-", dir=destination.parent))
     try:
         (staging / "bundles").mkdir()
-        (staging / "evidence").mkdir()
+        (staging / "calibration-results").mkdir()
         rows = []
         for row, raw, review, receipt in selected:
             filename = row["id"] + ".json"
             (staging / "bundles" / filename).write_bytes(raw)
-            (staging / "evidence" / filename).write_bytes(receipt)
+            (staging / "calibration-results" / filename).write_bytes(receipt)
             rows.append({"id": row["id"], "file": filename, "sha256": row["bundleSha256"],
-                         "domain": row["domain"], "difficulty": row["difficulty"],
+                         "domain": row["domain"], "category": row["taskCategory"], "difficulty": row["difficulty"],
+                         "calibrationSha256": digest(receipt),
                          "questionSemanticReview": "passed", "solverTrajectoryGenerated": False,
                          "origins": row["origins"]})
         focus = sum(r["domain"] in FOCUS for r in rows)

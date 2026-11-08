@@ -158,7 +158,7 @@ class PipelineTests(unittest.TestCase):
             check_calibration(receipt, row)
 
     def test_release_keeps_bytes_and_cannot_start_collection(self):
-        catalog, reviews, _, _, _ = self.reviewed()
+        catalog, reviews, _, evidence, _ = self.reviewed()
         output = self.root / "release"
         result = prepare_release(catalog, reviews, output)
         self.assertFalse(result["authorizedToStart"])
@@ -166,6 +166,12 @@ class PipelineTests(unittest.TestCase):
         self.assertEqual(result["solver"]["model"], "deepseek-flash")
         self.assertEqual(result["solver"]["protocol"], "rwkv-pi-xml-continuation-v3")
         self.assertEqual((output / "bundles/test-question-one.json").read_bytes(), (self.source / "one.json").read_bytes())
+        # Native admission groups by domain/category and reads this exact receipt path.
+        row = result["newBundles"][0]
+        self.assertEqual((row["domain"], row["category"]), ("python", "fix"))
+        exported = output / "calibration-results/test-question-one.json"
+        self.assertEqual(exported.read_bytes(), evidence.read_bytes())
+        self.assertEqual(sha256_file(exported), row["calibrationSha256"])
         with self.assertRaisesRegex(ValueError, "Release exists"):
             prepare_release(catalog, reviews, output)
 

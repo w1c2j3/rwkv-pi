@@ -14,7 +14,7 @@
 原题库（只读） → 最终题目快照 → 独立语义审核 + 真实沙盒校准
                                       ↓ 版本哈希一致
                                 冻结题目发布包
-                                      ↓ 后续显式接入
+                                      ↓ 经授权的私有 admission 桥接
                          现有 DeepSeek / Pi 作答与训练导出链
 ```
 
@@ -28,7 +28,8 @@
 - 旧题用“在 repo 目录创建 ops.sh”表达 `repo/ops.sh`，或把标准输出列作交付物时，保留原文并标出
   `deliverablesNotLiteralInPrompt` 供语义审核，不用字面路径匹配代替判断。
 - 发布检查完整的 baseline/reference/每个 wrong control 执行结果。超时/信号退出不能充当错误解被拒证据。
-- 发布包兼容现有 `newBundles` / `allowedAuthors` / `bundles/*.json` 布局。
+- 发布包兼容现有 `newBundles`（包含领域、类别、难度）/ `allowedAuthors` / `bundles/*.json` 布局，
+  并将原始校准记录保存在执行器读取的 `calibration-results/*.json`，记录校准文件哈希。
   `authorizedToStart=false`，需要后续明确接入既有 admission；不同作者可能还需既有 admission 的来源适配。
   本模块不导入原工作区未提交的运行时代码，也不重写 teacher 或 XML 渲染器。
 - 发布包报告数据管理＋Agent 调度与其余八领域的实际比例，目标为 **1:2**；不自动补齐、不伪造达标。
@@ -78,10 +79,12 @@ python3 -B -m unittest data_pipeline.test_pipeline -v
    多步是一次中文请求后的真实工具观察循环，不编造用户轮次，也不凑工具次数。
 2. **缩小 API 作者职责。** 模型输出结构化任务设计和必要素材；受审查的本地构建器负责
    环境初始化与固定业务规则。独立的边界/错误控制用于发现检查器漏洞。
-   第一版还没有实现该构建器，也没有证明这种方法能稳定生成五千道不同题目。
+   实际题目构建器和校准材料留在私有存储，不进入本仓库；小批题目通过验收，
+   不能据此断言能够稳定生成五千道不同题目。
 3. **接入现有校准和作答链。** 82 执行环境，DeepSeek Flash 单一作答教师，完整 Pi system prompt、
    中文问题与约束、高思考、`zh-reasoning-v2`、XML+JSON 连续轨迹及独立验收保持固定。
-   待显式接入后才运行模型，最后继续使用既有原生 tokenizer/renderer 打包。
+   冻结发布包已通过私有桥接接入既有作答链；经授权的发布才运行模型，
+   最后继续使用既有原生 tokenizer/renderer 打包。新作者来源和领域仍需核对既有 admission 支持及配额。
 4. **衡量合格产出。** 记录首次语义通过率、人工修复分钟数、每道合格题的费用与每小时
    通过轨迹数。API 能调用、生成 JSON、控制校准通过，都不能替代这些指标。
 
