@@ -1,0 +1,209 @@
+import assert from "node:assert/strict";
+import test from "node:test";
+import { once } from "node:events";
+import { createServer } from "node:http";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { createModels } from "@earendil-works/pi-ai";
+import { createRwkvProvider, readConfig } from "../dist/provider.js";
+import { ContinuationParser, parseCalls, parseJsonCalls } from "../dist/xml.js";
+import { renderPrompt, PROMPT_VERSION, JSON_PROMPT_VERSION } from "../dist/prompt.js";
+import { runTask } from "../dist/harness.js";
+
+const tools = [{ type: "function", function: { name: "read", parameters: { type: "object", properties: { path: { type: "string" } }, required: ["path"], additionalProperties: false } } }];
+const xml = '<tool_call>{"name":"read","arguments":{"path":"input.txt"}}</tool_call>';
+const nativeJson = '{"type":"toolCall","id":"call_1","name":"read","arguments":{"path":"input.txt"}}';
+
+test("native pi JSON preserves IDs and requires complete schema-valid calls", () => {
+  assert.equal(parseJsonCalls(nativeJson, tools)[0].id, "call_1");
+  assert.deepEqual(JSON.parse(parseJsonCalls(nativeJson.replace('input.txt', '</tool_call> { \\"quoted\\" }'), tools)[0].function.arguments), {path:'</tool_call> { "quoted" }'});
+  for (const bad of [nativeJson.slice(0,-1), nativeJson+' trailing', nativeJson.replace('"read"','"unknown"'),
+    nativeJson.replace('"input.txt"','5'),nativeJson.replace('"path":"input.txt"','"path":"a","path":"b"'),
+    nativeJson.replace('"type":"toolCall",',''), '['+nativeJson+','+nativeJson+']']) assert.throws(()=>parseJsonCalls(bad,tools));
+  assert.throws(()=>parseJsonCalls(nativeJson,tools,'none'));
+  assert.deepEqual(parseJsonCalls('{"answer":42}',tools),[]);
+  for (let size=1;size<30;size++) {
+    const p=new ContinuationParser(true,tools,'auto','json'), deltas=[];
+    const source='>检查目录。😀</think>\n'+nativeJson;
+    for(let i=0;i<source.length;i+=size)deltas.push(...p.push(source.slice(i,i+size)));
+    assert.ok(deltas.every(d=>!d.tool_calls));
+    deltas.push(...p.finish('stop').deltas);
+    assert.equal(deltas.flatMap(d=>d.tool_calls??[])[0].id,'call_1');
+    assert.equal(deltas.map(d=>d.reasoning_content??'').join(''),'检查目录。😀');
+  }
+  for(const text of ['{"answer":42}', 'Example:\n```json\n'+nativeJson+'\n```']) {
+    const p=new ContinuationParser(false,tools,'auto','json');
+    const deltas=[...p.push(text),...p.finish('stop').deltas];
+    assert.equal(deltas.map(d=>d.content??'').join(''),text);
+    assert.ok(deltas.every(d=>!d.tool_calls));
+  }
+  const p=new ContinuationParser(false,tools,'auto','json');p.push(nativeJson);
+  assert.throws(()=>p.finish('length'),/Truncated/);
+});
+
+test("client XML parsing rejects malformed calls and preserves nested tag strings and examples", () => {
+  assert.deepEqual(JSON.parse(parseCalls(xml.replace("input.txt", "</tool_call>"), tools)[0].function.arguments), { path: "</tool_call>" });
+  for (const bad of [xml.slice(0, -1), xml.replace('"read"', '"bash"'), xml.replace('"input.txt"', '5'), xml.replace('"path":"input.txt"', '"path":"input.txt","path":"second"'), xml + " trailing text", '<tool_call>{"name":"read","arguments":{"path":"a","x":1e309}}</tool_call>']) assert.throws(() => parseCalls(bad, tools));
+  assert.throws(() => parseCalls(xml, tools, "none"));
+  const p = new ContinuationParser(false, tools);
+  const text = 'Example:\n```xml\n' + xml + '\n```\n{"name":"read","arguments":{"path":"x"}}';
+  const deltas = [...p.push(text), ...p.finish("stop").deltas];
+  assert.equal(deltas.map(d => d.content ?? "").join(""), text);
+  assert.ok(deltas.every(d => !d.tool_calls));
+});
+
+test("arbitrary chunk boundaries preserve reasoning and withhold incomplete calls", () => {
+  for (let size = 1; size < 30; size++) {
+    const p = new ContinuationParser(true, tools), source = '>先检查文件。😀</think>\n' + xml, deltas = [];
+    for (let i = 0; i < source.length; i += size) deltas.push(...p.push(source.slice(i, i + size)));
+    assert.ok(deltas.every(d => !d.tool_calls));
+    const result = p.finish("stop"); deltas.push(...result.deltas);
+    assert.equal(result.reason, "tool_calls");
+    assert.equal(deltas.map(d => d.reasoning_content ?? "").join(""), "先检查文件。😀");
+    assert.equal(deltas.flatMap(d => d.tool_calls ?? []).length, 1);
+  }
+  const p = new ContinuationParser(false, tools); p.push(xml);
+  assert.throws(() => p.finish("length"), /Truncated/);
+});
+
+async function endpoint(t, answers) {
+  const requests = [], stops = [], paths = [];
+  const server = createServer(async (req, res) => {
+    let raw = ""; for await (const part of req) raw += part;
+    const body = JSON.parse(raw);
+    if (req.url === "/v1/tokens/count") { res.setHeader("content-type", "application/json"); res.end('{"tokens":100}'); return; }
+    if (req.url === "/v1/server/stop") { stops.push(body); res.end('{}'); return; }
+    paths.push(req.url); requests.push(body);
+    const result = answers[requests.length - 1];
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    const emit = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: "raw-native", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason, ...(finish_reason && result.matchedStop ? { matched_stop: result.matchedStop } : {}) }] })}\n\n`);
+    for (const content of result.text.match(/[\s\S]{1,3}/g) ?? []) emit({ content });
+    if (result.hold) return;
+    if (!result.incomplete) { emit({}, result.finish ?? "stop"); res.write("data: [DONE]\n\n"); }
+    res.end();
+  });
+  server.listen(0, "127.0.0.1"); await once(server, "listening");
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+  return { config: readConfig({ RWKV_BASE_URL: `http://127.0.0.1:${server.address().port}/v1` }), requests, stops, paths };
+}
+
+test("real pi harness executes client-parsed XML and replays observations in raw continuation", async t => {
+  const { config, requests, paths } = await endpoint(t, [{ text: xml + "\n\nUser:", matchedStop: "\nUser:" }, { text: "Read successfully.<EOD>", matchedStop: "<EOD>" }]);
+  const outputDir = await mkdtemp(join(tmpdir(), "rwkv-lightning-test-")); t.after(() => rm(outputDir, { recursive: true, force: true }));
+  const { record } = await runTask({ schemaVersion: 1, id: "continuation-fixture", family: "continuation-fixture", split: "smoke", source: "mock protocol fixture only", prompt: "Read input.txt.", tools: ["read"], files: { "input.txt": "OBSERVATION_SENTINEL\n" }, checks: [{ type: "file_equals", path: "input.txt", expected: "OBSERVATION_SENTINEL\n" }] }, { provider: createRwkvProvider(config), role: "smoke", outputDir, maxRequests: 2, timeoutMs: 15000, sandbox: "none", thinkingLevel: "off" });
+  assert.equal(record.status, "passed", record.error);
+  assert.equal(record.responseAdapter, "rwkv-xml-continuation-v2");
+  assert.equal(record.promptVersion, PROMPT_VERSION);
+  assert.equal(record.steps[0].response.stopReason, "toolUse");
+  assert.equal(requests.length, 2);
+  assert.deepEqual(paths, ["/v1/batch/completions", "/v1/batch/completions"]);
+  assert.equal(requests[0].session_id, undefined);
+  assert.equal(requests[0].think_type, undefined);
+  assert.equal(requests[0].force_reasoning, false);
+  assert.match(requests[1].contents[0], /<tool_response>\n.*OBSERVATION_SENTINEL/s);
+  assert.equal(requests[0].messages, undefined); assert.equal(requests[0].tools, undefined);
+  assert.deepEqual(requests[0].stop, ["<EOD>", "✿", "\nUser:", "\n### User"]); assert.equal(requests[0].stop_tokens, undefined);
+  assert.equal(requests[0].contents[0], renderPrompt(record.steps[0].request.messages, record.steps[0].request.tools, false));
+  assert.ok(requests[1].contents[0].startsWith(requests[0].contents[0] + xml + "\n\nUser: <tool_response>\n"));
+});
+
+test("native pi JSON executes through the real harness and matches canonical replay",async t=>{
+  const {config,requests}=await endpoint(t,[{text:nativeJson+'\n\nUser:',matchedStop:'\nUser:'},{text:'Read successfully.<EOD>',matchedStop:'<EOD>'}]);
+  const outputDir=await mkdtemp('/mnt/f/rwkv-pi-data/tmp/native-json-test-');t.after(()=>rm(outputDir,{recursive:true,force:true}));
+  const jsonConfig={...config,toolFormat:'json',promptTemplate:'json'};
+  const {record}=await runTask({schemaVersion:1,id:'json-fixture',family:'json-fixture',split:'smoke',source:'mock protocol test; not model evaluation',prompt:'Read input.txt.',tools:['read'],files:{'input.txt':'NATIVE_JSON_OBSERVATION\n'},checks:[{type:'file_equals',path:'input.txt',expected:'NATIVE_JSON_OBSERVATION\n'}]},
+    {provider:createRwkvProvider(jsonConfig),role:'smoke',outputDir,maxRequests:2,timeoutMs:15000,sandbox:'bubblewrap',thinkingLevel:'off'});
+  assert.equal(record.status,'passed',record.error);
+  assert.equal(record.promptVersion,JSON_PROMPT_VERSION);
+  assert.equal(record.responseAdapter,'rwkv-json-continuation-v1');
+  assert.equal(record.steps[0].response.content.find(b=>b.type==='toolCall').id,'call_1');
+  assert.match(requests[1].contents[0],/"role":"tool","tool_call_id":"call_1","content":"NATIVE_JSON_OBSERVATION/);
+  assert.equal(requests[0].contents[0],renderPrompt(record.steps[0].request.messages,record.steps[0].request.tools,false,true,'json'));
+  assert.ok(requests[1].contents[0].startsWith(requests[0].contents[0]+nativeJson+'\n\nUser: '));
+  assert.ok(!requests[0].contents[0].includes('<tool_call>'));
+  assert.equal(requests[0].messages,undefined);assert.equal(requests[0].tools,undefined);
+});
+
+test("JSON transport withholds calls on incomplete streams and cancellation",async t=>{
+  for(const answer of [{text:nativeJson,incomplete:true},{text:nativeJson}]) {
+    const {config}=await endpoint(t,[answer]);
+    const models=createModels(),provider=createRwkvProvider({...config,toolFormat:'json',promptTemplate:'json'});models.setProvider(provider);
+    const result=await models.completeSimple(provider.getModels()[0],{messages:[{role:'user',content:'Read.',timestamp:1}],tools:[{name:'read',description:'read',parameters:tools[0].function.parameters}]});
+    assert.equal(result.stopReason,'error');assert.ok(result.content.every(c=>c.type!=='toolCall'));
+  }
+});
+
+test("canonical tool-only history preserves the generated turn without an added blank line", () => {
+  const history = [{ role: "user", content: "Read input.txt." }];
+  const assistant = { role: "assistant", content: null, tool_calls: [{ function: { name: "read", arguments: '{"path":"input.txt"}' } }] };
+  assert.equal(renderPrompt([...history, assistant], tools, false, false), renderPrompt(history, tools, false) + xml + "\n\n");
+  const open = renderPrompt(history, tools, true);
+  assert.equal(renderPrompt([...history, { ...assistant, reasoning_content: "Check the file." }], tools, true, false), open + ">Check the file.</think>\n" + xml + "\n\n");
+});
+
+test("native stop metadata must describe an exact suffix; internal mentions remain text", () => {
+  const source = "This is an example containing <EOD> inside a sentence. ".repeat(6);
+  const p = new ContinuationParser(false, []), deltas = [];
+  for (const char of source + "<EOD>") deltas.push(...p.push(char));
+  deltas.push(...p.finish("stop", "<EOD>").deltas);
+  assert.equal(deltas.map(d => d.content ?? "").join(""), source);
+  for (const [text, reason, stop] of [[xml + "\nUser: ", "stop", "\nUser:"], [xml + "<EOD>", "length", "<EOD>"], [xml, "stop", "</tool_call>"]]) {
+    const invalid = new ContinuationParser(false, tools); invalid.push(text);
+    assert.throws(() => invalid.finish(reason, stop), /Invalid native stop metadata/);
+  }
+});
+
+test("incomplete SSE cannot expose a complete XML call", async t => {
+  const { config } = await endpoint(t, [{ text: xml, incomplete: true }]);
+  const models = createModels(), provider = createRwkvProvider(config); models.setProvider(provider);
+  const result = await models.completeSimple(provider.getModels()[0], { messages: [{ role: "user", content: "Read.", timestamp: 1 }], tools: [{ name: "read", description: "read", parameters: tools[0].function.parameters }] });
+  assert.equal(result.stopReason, "error");
+  assert.ok(result.content.every(c => c.type !== "toolCall"));
+});
+
+test("native cancellation cannot authorize tools merely by reporting finish_reason stop", async t => {
+  const { config } = await endpoint(t, [{ text: xml }]);
+  const models = createModels(), provider = createRwkvProvider(config); models.setProvider(provider);
+  const result = await models.completeSimple(provider.getModels()[0], { messages: [{ role: "user", content: "Read.", timestamp: 1 }], tools: [{ name: "read", description: "read", parameters: tools[0].function.parameters }] });
+  assert.equal(result.stopReason, "error");
+  assert.match(result.errorMessage, /without a configured text boundary/);
+  assert.ok(result.content.every(c => c.type !== "toolCall"));
+});
+
+test("Open Think content and registered adapter selection survive the client transport", async t => {
+  const { config, requests } = await endpoint(t, [{ text: ">检查一下。</think>完成。<EOD>", matchedStop: "<EOD>" }]);
+  const models = createModels(), provider = createRwkvProvider({ ...config, adapterId: "trained", adapterVersion: "revision", adapterScale: 0.5 }); models.setProvider(provider);
+  const result = await models.completeSimple(provider.getModels()[0], { messages: [{ role: "user", content: "Hi", timestamp: 1 }] }, { reasoning: "high", temperature: 0 });
+  assert.equal(result.stopReason, "stop", result.errorMessage);
+  assert.equal(result.content.find(c => c.type === "thinking").thinking, "检查一下。");
+  assert.equal(result.content.find(c => c.type === "text").text, "完成。");
+  assert.equal(requests[0].adapter_id, "trained");
+  assert.equal(requests[0].adapter_version, "revision");
+  assert.equal(requests[0].adapter_scale, 0.5);
+  assert.equal(requests[0].temperature, 1); assert.equal(requests[0].top_k, 1);
+});
+
+test("client abort stops only the native request ID", async t => {
+  const { config, stops } = await endpoint(t, [{ text: "Generating a long answer. ".repeat(16), hold: true }]);
+  const models = createModels(), provider = createRwkvProvider(config); models.setProvider(provider);
+  const controller = new AbortController();
+  const stream = models.streamSimple(provider.getModels()[0], { messages: [{ role: "user", content: "Hi", timestamp: 1 }] }, { signal: controller.signal });
+  for await (const event of stream) if (event.type === "text_delta") { controller.abort(); break; }
+  const result = await stream.result();
+  assert.equal(result.stopReason, "aborted");
+  for (let i = 0; i < 50 && !stops.length; i++) await new Promise(resolve => setTimeout(resolve, 20));
+  assert.deepEqual(stops, [{ request_id: "raw-native" }]);
+});
+
+test("Lightning XML continuation is default; legacy native APIs require explicit selection", () => {
+  assert.equal(readConfig({}).toolFormat, "xml");
+  assert.equal(readConfig({}).backend, "lightning");
+  assert.throws(() => readConfig({ RWKV_TOOL_FORMAT: "native" }), /Lightning/);
+  assert.equal(readConfig({ RWKV_BACKEND: "openai" }).toolFormat, "native");
+  assert.throws(() => readConfig({ RWKV_ADAPTER_VERSION: "v1" }), /ADAPTER_ID/);
+  assert.throws(() => readConfig({ RWKV_ADAPTER_ID: "a", RWKV_ADAPTER_SCALE: "NaN" }), /finite/);
+  const model = createRwkvProvider(readConfig({ RWKV_ADAPTER_ID: "a", RWKV_ADAPTER_VERSION: "v1", RWKV_ADAPTER_SCALE: "0" })).getModels()[0];
+  assert.equal(model.samplingParams.adapter_id, "a");
+  assert.equal(model.samplingParams.adapter_scale, 0);
+});

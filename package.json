@@ -5,7 +5,9 @@
   "description": "RWKV Lightning CUDA continuation client for the pi coding agent.",
   "type": "module",
   "bin": {
-    "rwkv-pi": "dist/cli.js"
+    "rwkv-pi": "dist/cli.js",
+    "rwkv-pi-orchestrate": "dist/orchestrate-cli.js",
+    "rwkv-pi-step": "dist/step-cli.js"
   },
   "exports": {
     ".": {
@@ -27,18 +29,28 @@
     "build": "tsc -p tsconfig.json",
     "start": "node dist/cli.js",
     "start:source": "node scripts/run-pi-source.mjs dist/cli.js",
+    "orchestrate": "node dist/orchestrate-cli.js",
+    "step": "node dist/step-cli.js",
     "pi:setup": "node scripts/setup-pi-source.mjs",
     "harness": "node dist/harness-cli.js",
     "harness:source": "node scripts/run-pi-source.mjs dist/harness-cli.js",
     "collab": "node scripts/run-pi-source.mjs dist/collaboration-cli.js",
     "dataset": "node dist/dataset-cli.js",
     "tokenize": "node pipeline/compile-lightning-dataset.mjs",
+    "smoke": "node scripts/smoke-harness.mjs",
+    "smoke:source": "node scripts/run-pi-source.mjs scripts/smoke-harness.mjs",
+    "test:source": "node scripts/run-pi-source.mjs --test test/integration.test.mjs test/harness.test.mjs test/sandbox.test.mjs test/tool-adapter.test.mjs test/token-budget.test.mjs test/loop-guard.test.mjs test/lightning.test.mjs test/stall-detector.test.mjs test/auto-collab.test.mjs test/collaboration.test.mjs test/recovery.test.mjs test/subagents.test.mjs test/orchestrator-extension.test.mjs test/orchestrator-flow.test.mjs test/project-participation.test.mjs test/deepseek-teacher.test.mjs test/step-teacher.test.mjs test/step-teacher-cli.test.mjs pipeline/test/teacher-pipeline.test.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test test/*.test.mjs pipeline/test/*.test.mjs",
     "prepare": "npm run build",
+    "tokenize:legacy": "node pipeline/compile-dataset.mjs",
     "lightning:tokenizer": "node scripts/build-lightning-tokenizer.mjs",
     "lightning:setup": "npm run build && node scripts/setup-lightning.mjs",
-    "test": "npm run build && node --test test/config.test.mjs",
-    "privacy:check": "python3 -B scripts/check-code-only.py --refs HEAD"
+    "test:queue": "python3 -m unittest discover -s pipeline/test -p 'teacher_queue_test.py' -v",
+    "test:scope": "python3 -m unittest discover -s pipeline/test -p 'teacher_scope_test.py' -v",
+    "test:grounding": "python3 -B -m unittest discover -s pipeline/test -p 'repository_grounding_test.py' -v",
+    "pipeline:check": "python3 -B pipeline/rwkv-data.py check",
+    "pipeline:test": "node --test pipeline/test/*.test.mjs && python3 -B -m unittest discover -s pipeline/test -p '*_test.py' -v && python3 -B -m unittest discover -s pipeline/test -p 'test_*.py' -v"
   },
   "engines": {
     "node": ">=22.19.0"

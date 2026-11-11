@@ -10,9 +10,28 @@ export interface RwkvConfig {
   toolFormat: "xml" | "json" | "native";
   promptTemplate: "xml" | "json" | "irwkv" | "g1";
   repeatFailureLimit: number;
+  /** Pass envelope-complete but invalid calls to pi's native validation (tool error result) instead of aborting the turn. */
+  toolCallRecovery: boolean;
+  /** Block an identical tool call after this many identical consecutive calls with identical results (0 disables). */
+  identicalCallLimit: number;
+  /** Block a path-based call after this many consecutive failures of that tool on that path (0 disables). */
+  targetFailureLimit: number;
+  /** Recall-tolerant read/edit/write/ls execution (src/tolerant-tools.ts); prompts are unchanged. */
+  toolTolerance: boolean;
   adapterId?: string;
   adapterVersion?: string;
   adapterScale?: number;
+}
+
+/** Unsigned decimal integer from the environment, at least `min`. */
+export function envInteger(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number): number {
+  const raw = env[name]?.trim();
+  if (!raw) return fallback;
+  const value = Number(raw);
+  if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value < min) {
+    throw new Error(`${name} must be ${min === 0 ? "0 (disabled) or " : ""}a positive integer.`);
+  }
+  return value;
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
@@ -30,17 +49,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
     throw new Error("RWKV_BASE_URL must point to the API root (for example /v1), not /chat/completions.");
   }
 
-  function positiveInteger(name: string, fallback: number): number {
-    const raw = env[name]?.trim();
-    if (!raw) return fallback;
-    const value = Number(raw);
-    if (!/^\d+$/.test(raw) || !Number.isSafeInteger(value) || value <= 0) {
-      throw new Error(`${name} must be a positive integer.`);
-    }
-    return value;
-  }
-
-  const contextWindow = positiveInteger("RWKV_CONTEXT_WINDOW", 32768);
+  const positiveInteger = (name: string, fallback: number) => envInteger(env, name, fallback, 1);
+  const contextWindow = positiveInteger("RWKV_CONTEXT_WINDOW", 131072);
   const backend = env.RWKV_BACKEND?.trim() || "lightning";
   if (!["lightning", "openai"].includes(backend)) throw new Error("RWKV_BACKEND must be lightning or openai.");
   const toolFormat = env.RWKV_TOOL_FORMAT?.trim() || (backend === "lightning" ? "xml" : "native");
@@ -49,12 +59,15 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
   if (!["xml", "json", "irwkv", "g1"].includes(promptTemplate)) throw new Error("RWKV_PROMPT_TEMPLATE must be xml, json, irwkv or g1.");
   if (backend === "lightning" && promptTemplate !== toolFormat) throw new Error("Lightning prompt template must match its tool format.");
   const maxTokens = positiveInteger("RWKV_MAX_TOKENS", 8192);
-  const repeatRaw = env.RWKV_REPEAT_FAILURE_LIMIT?.trim() || "3";
-  const repeatFailureLimit = Number(repeatRaw);
-  if (!/^\d+$/.test(repeatRaw) || !Number.isSafeInteger(repeatFailureLimit)
-    || (repeatFailureLimit !== 0 && repeatFailureLimit < 2)) {
-    throw new Error("RWKV_REPEAT_FAILURE_LIMIT must be 0 (disabled) or an integer >= 2.");
-  }
+  const repeatFailureLimit = envInteger(env, "RWKV_REPEAT_FAILURE_LIMIT", 3, 0);
+  if (repeatFailureLimit === 1) throw new Error("RWKV_REPEAT_FAILURE_LIMIT must be 0 (disabled) or an integer >= 2.");
+  const recoveryRaw = env.RWKV_TOOL_CALL_RECOVERY?.trim() || "1";
+  if (!["0", "1"].includes(recoveryRaw)) throw new Error("RWKV_TOOL_CALL_RECOVERY must be 0 or 1.");
+  const identicalCallLimit = envInteger(env, "RWKV_IDENTICAL_CALL_LIMIT", 2, 0);
+  const targetFailureLimit = envInteger(env, "RWKV_TARGET_FAILURE_LIMIT", 3, 0);
+  if (targetFailureLimit === 1) throw new Error("RWKV_TARGET_FAILURE_LIMIT must be 0 (disabled) or an integer >= 2.");
+  const toleranceRaw = env.RWKV_TOOL_TOLERANCE?.trim() || "1";
+  if (!["0", "1"].includes(toleranceRaw)) throw new Error("RWKV_TOOL_TOLERANCE must be 0 or 1.");
   if (maxTokens >= contextWindow) {
     throw new Error("RWKV_MAX_TOKENS must be smaller than RWKV_CONTEXT_WINDOW to leave room for the prompt.");
   }
@@ -72,6 +85,10 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
     contextWindow,
     maxTokens,
     repeatFailureLimit,
+    toolCallRecovery: recoveryRaw === "1",
+    identicalCallLimit,
+    targetFailureLimit,
+    toolTolerance: toleranceRaw === "1",
     ...(adapterId ? { adapterId } : {}),
     ...(adapterVersion ? { adapterVersion } : {}),
     ...(adapterScale !== undefined ? { adapterScale } : {}),

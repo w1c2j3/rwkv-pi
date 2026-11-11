@@ -41,7 +41,8 @@ export function createRwkvModel(config: RwkvConfig = readConfig()): Model<"opena
 }
 
 export function createRwkvProvider(config: RwkvConfig = readConfig()): Provider<"openai-completions"> & {
-  rwkvPiToolFormat: RwkvConfig["toolFormat"]; rwkvPiRepeatFailureLimit: number;
+  rwkvPiToolFormat: RwkvConfig["toolFormat"]; rwkvPiRepeatFailureLimit: number; rwkvPiToolCallRecovery: boolean; rwkvPiIdenticalCallLimit: number;
+  rwkvPiTargetFailureLimit: number; rwkvPiToolTolerance: boolean;
 } {
   const api = withRwkvTransport(openAICompletionsApi(), config.repeatFailureLimit, config);
   return Object.assign(createProvider({
@@ -62,5 +63,7 @@ export function createRwkvProvider(config: RwkvConfig = readConfig()): Provider<
     },
     models: [createRwkvModel(config)],
     api,
-  }), { rwkvPiToolFormat: config.toolFormat, rwkvPiRepeatFailureLimit: config.repeatFailureLimit });
+  }), { rwkvPiToolFormat: config.toolFormat, rwkvPiRepeatFailureLimit: config.repeatFailureLimit,
+    rwkvPiToolCallRecovery: config.backend === "lightning" && config.toolCallRecovery, rwkvPiIdenticalCallLimit: config.identicalCallLimit,
+    rwkvPiTargetFailureLimit: config.targetFailureLimit, rwkvPiToolTolerance: config.toolTolerance });
 }

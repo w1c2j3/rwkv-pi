@@ -36,7 +36,7 @@ function validateMessages(messages: Record<string, unknown>[], tools: unknown[])
   }
 }
 
-export function buildDataset(runs: RunRecord[], includeSmoke = false) {
+export function buildDataset(runs: RunRecord[], includeSmoke = false, approvedQuestionAuthors: ReadonlySet<string> = new Set()) {
   const families = new Map<string, string>();
   const taskSplits = new Map<string, string>();
   const taskIds = new Map<string, string>();
@@ -45,7 +45,7 @@ export function buildDataset(runs: RunRecord[], includeSmoke = false) {
   const rejected: { runId: string; reason: string }[] = [];
   for (const run of runs) {
     if (!object(run) || run.schemaVersion !== 1 || typeof run.runId !== "string"
-      || !["teacher", "student", "smoke"].includes(run.role) || !Array.isArray(run.steps) || !Array.isArray(run.checks)
+      || !["teacher", "student", "smoke", "question-author"].includes(run.role) || !Array.isArray(run.steps) || !Array.isArray(run.checks)
       || !object(run.model) || !object(run.provenance)) throw new Error("Invalid or unknown run schema.");
     const task = parseTask(run.task);
     const { id: _id, split: _split, ...definition } = task;
@@ -58,6 +58,10 @@ export function buildDataset(runs: RunRecord[], includeSmoke = false) {
     if (taskIds.has(task.id) && taskIds.get(task.id) !== run.taskSha256) throw new Error(`Task ID has conflicting definitions: ${task.id}`);
     taskIds.set(task.id, run.taskSha256);
     const smoke = run.role === "smoke" || task.split === "smoke";
+    if (run.role === "question-author" && !approvedQuestionAuthors.has(run.runId)) {
+      rejected.push({ runId: run.runId, reason: "question_author_needs_independent_acceptance" });
+      continue;
+    }
     if ((smoke && !includeSmoke) || run.status !== "passed" || run.checks.length !== task.checks.length || !run.checks.every((check) => check.passed)) {
       rejected.push({ runId: run.runId, reason: smoke && !includeSmoke ? "smoke_fixture" : "not_verified" });
       continue;

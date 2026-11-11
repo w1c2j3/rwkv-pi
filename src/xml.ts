@@ -34,16 +34,29 @@ export function callStart(text: string, partial = false): number | undefined {
   return undefined;
 }
 
-/** Parse complete frames only. JSON string contents may themselves contain closing tags. */
-export function parseCalls(source: string, tools: any[], choice: any = "auto") {
+/** Parse complete frames only. JSON string contents may themselves contain closing tags.
+ * recover=false: any malformed frame aborts the turn (strict, rwkv-xml-continuation-v2).
+ * recover=true: an envelope whose JSON, tool name or arguments are invalid is still handed to pi with
+ * the model's own name and argument text, so pi's native validation returns a tool error result the
+ * model can react to (unknown tool -> "Tool X not found"; bad JSON -> "Invalid arguments ..."; schema
+ * mismatch -> "Validation failed ..." after pi's standard coercion). Nothing is invented: arguments are
+ * the generated text, never repaired. Text outside envelopes and unnamed frames remain fatal. */
+export function parseCalls(source: string, tools: any[], choice: any = "auto", recover = false) {
   if (Buffer.byteLength(source) > 1024 * 1024) throw new Error("XML calls exceed 1 MiB.");
   const allowed = new Map(tools.map(t => [t.function.name, t.function.parameters]));
   const calls: any[] = [];
+  const push = (name: string, args: string) => {
+    if (choice === "none") throw new Error("Tool is not allowed.");
+    if (typeof choice === "object" && choice.function?.name !== name) throw new Error("Named tool choice mismatch.");
+    calls.push({ index: calls.length, id: `call_${randomUUID().replaceAll("-", "")}`, type: "function", function: { name, arguments: args } });
+    if (calls.length > 16) throw new Error("Too many tool calls.");
+  };
   let tail = source.trim();
   while (tail) {
     const opening = ["<tool_call>", "<tool_calls>"].find(t => tail.startsWith(t));
     if (!opening) throw new Error("Expected only XML tool-call envelopes.");
     tail = tail.slice(opening.length).trimStart();
+    const closing = opening.replace("<", "</");
     // Locate a JSON boundary without treating closing tags inside strings as delimiters.
     let quoted = false, escape = false, depth = 0, end = -1;
     for (let i = 0; i < tail.length; i++) {
@@ -53,25 +66,42 @@ export function parseCalls(source: string, tools: any[], choice: any = "auto") {
       else if (c === "{" || c === "[") depth++;
       else if (c === "}" || c === "]") { if (--depth === 0) { end = i + 1; break; } }
     }
-    if (end < 0) throw new Error("Incomplete XML JSON payload.");
-    const value: any = strictJson(tail.slice(0, end));
-    tail = tail.slice(end).trimStart();
-    const closing = opening.replace("<", "</");
-    if (!tail.startsWith(closing)) throw new Error("Missing XML closing tag.");
-    tail = tail.slice(closing.length).trim();
+    if (end < 0 && !recover) throw new Error("Incomplete XML JSON payload.");
+    let value: any;
+    try { if (end > 0) value = strictJson(tail.slice(0, end)); } catch (error) { if (!recover) throw error; }
+    const after = tail.slice(Math.max(end, 0)).trimStart();
+    if (value !== undefined && after.startsWith(closing)) tail = after.slice(closing.length).trim();
+    else if (value !== undefined && recover && !after) tail = ""; // closing tag missing at the end of the turn
+    else {
+      if (!recover) throw new Error("Missing XML closing tag.");
+      // Broken JSON or extra braces: the frame runs to the next closing tag (or the end of the turn)
+      // and its argument text is handed to pi verbatim.
+      const close = tail.indexOf(closing, Math.max(end, 0));
+      const frame = (close < 0 ? tail : tail.slice(0, close)).trim();
+      tail = close < 0 ? "" : tail.slice(close + closing.length).trim();
+      const head = /^\{\s*"name"\s*:\s*"((?:[^"\\]|\\.)*)"\s*,\s*"arguments"\s*:\s*/.exec(frame);
+      if (!head) throw new Error("Invalid JSON in XML tool call.");
+      let raw = frame.slice(head[0].length).trim();
+      if (raw.endsWith("}")) raw = raw.slice(0, -1).trimEnd(); // the envelope object's own brace
+      push(JSON.parse(`"${head[1]}"`), raw);
+      continue;
+    }
     const batch = opening === "<tool_calls>" ? value : [value];
     if (!Array.isArray(batch) || !batch.length) throw new Error("Empty tool-call frame.");
     for (let f of batch) {
       if (f?.function) {
-        if (Object.keys(f).some(k => !["type", "id", "function"].includes(k)) || (f.type && f.type !== "function")) throw new Error("Invalid function wrapper.");
+        if (!recover && (Object.keys(f).some(k => !["type", "id", "function"].includes(k)) || (f.type && f.type !== "function"))) throw new Error("Invalid function wrapper.");
         f = f.function;
       }
+      if (recover) {
+        if (!f || typeof f !== "object" || typeof f.name !== "string" || !f.name) throw new Error("Tool is not allowed.");
+        push(f.name, typeof f.arguments === "string" ? f.arguments : JSON.stringify(f.arguments ?? {}));
+        continue;
+      }
       if (!f || Object.keys(f).sort().join() !== "arguments,name" || !allowed.has(f.name) || choice === "none") throw new Error("Tool is not allowed.");
-      if (typeof choice === "object" && choice.function?.name !== f.name) throw new Error("Named tool choice mismatch.");
       const args = typeof f.arguments === "string" ? strictJson(f.arguments) : f.arguments;
       if (!args || typeof args !== "object" || Array.isArray(args) || !ajv.validate(allowed.get(f.name), args)) throw new Error(`Invalid arguments for ${f.name}.`);
-      calls.push({ index: calls.length, id: `call_${randomUUID().replaceAll("-", "")}`, type: "function", function: { name: f.name, arguments: JSON.stringify(args) } });
-      if (calls.length > 16) throw new Error("Too many tool calls.");
+      push(f.name, JSON.stringify(args));
     }
   }
   if (!calls.length) throw new Error("No tool calls.");
@@ -116,7 +146,7 @@ export class ContinuationParser {
   raw = "";
   private reasonSent = 0;
   private textSent = 0;
-  constructor(private thinking: boolean, private tools: any[], private choice: any = "auto", private format: ToolFormat = "xml") {}
+  constructor(private thinking: boolean, private tools: any[], private choice: any = "auto", private format: ToolFormat = "xml", private recover = false) {}
   private callStart(text: string) { return this.format === "json" ? jsonCallStart(text) : callStart(text, true); }
   private split() {
     if (!this.thinking) return { reasoning: "", text: this.raw, open: false };
@@ -148,7 +178,7 @@ export class ContinuationParser {
     const start = this.callStart(text);
     if (open && reason !== "length") throw new Error("Unclosed reasoning block.");
     if (start !== undefined && reason !== "stop") throw new Error("Truncated tool call; execution refused.");
-    const calls = start === undefined ? [] : (this.format === "json" ? parseJsonCalls : parseCalls)(text.slice(start), this.tools, this.choice);
+    const calls = start === undefined ? [] : (this.format === "json" ? parseJsonCalls(text.slice(start), this.tools, this.choice) : parseCalls(text.slice(start), this.tools, this.choice, this.recover));
     if (!calls.length && (this.choice === "required" || typeof this.choice === "object") && reason === "stop") throw new Error("Required tool call missing.");
     const deltas: Record<string, unknown>[] = [];
     if (open) {

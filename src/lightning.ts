@@ -43,7 +43,7 @@ export function lightningFetch(config: RwkvConfig, fetcher: typeof fetch): typeo
     // and prefills only its token suffix. Chat's compatibility route bypasses it.
     const response = await fetcher(config.baseUrl + "/batch/completions", { ...init, body: JSON.stringify(wire), signal });
     if (!response.ok || !response.body) return response;
-    const parser = new ContinuationParser(thinking, chat.tools ?? [], chat.tool_choice ?? "auto", format);
+    const parser = new ContinuationParser(thinking, chat.tools ?? [], chat.tool_choice ?? "auto", format, config.toolCallRecovery);
     let requestId: string | undefined, finished = false, stopSent = false;
     const encoder = new TextEncoder();
     const reader = response.body.getReader();

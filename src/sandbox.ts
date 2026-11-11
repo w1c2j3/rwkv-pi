@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
-import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { randomUUID } from "node:crypto";
+import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, join, resolve } from "node:path";
 import type { Readable } from "node:stream";
@@ -8,6 +9,14 @@ import {
   createLsToolDefinition, createReadToolDefinition, createWriteToolDefinition, type ToolDefinition,
 } from "@earendil-works/pi-coding-agent";
 import { type PiToolName, PI_TOOL_NAMES } from "./tools.js";
+import { dockerHostPath, type TaskEnvironment } from "./environment.js";
+import { LIST_FILES_SCRIPT, MAX_LISTED_FILES, SKIPPED_DIRECTORIES, type WorkspaceFs } from "./tolerant-tools.js";
+
+/**
+ * Where bubblewrap shows the workspace to the agent. A short fixed path keeps the long host run
+ * directory (with its run UUID) out of the prompt and out of every path the model has to repeat.
+ */
+export const WORKSPACE_MOUNT = "/workspace";
 
 type Spawned = ChildProcessByStdio<null, Readable, Readable>;
 type SpawnHook = { spawn: (command: string, args: string[]) => Spawned };
@@ -23,15 +32,32 @@ function hostBinary(name: "rg" | "fd"): string | undefined {
   return undefined;
 }
 
-/** Native pi schemas/rendering, with file and process operations in a Linux namespace. */
+/**
+ * Native pi schemas/rendering, with file and process operations isolated from the host.
+ *
+ * Without an environment every call runs in a fresh bubblewrap namespace over the host's
+ * read-only system directories. With a task environment every call runs in a fresh
+ * `docker run --rm` container of the pinned image instead (no network, no capabilities,
+ * read-only root, the caller's uid), with the workspace mounted at the image's workdir;
+ * `cwd` is then that in-container path. Without one the workspace is mounted at /workspace.
+ * Both give the same semantics: only the workspace persists between calls, and a call's
+ * processes end with it.
+ */
 export class WorkspaceSandbox {
-  readonly kind = "bubblewrap";
+  readonly kind: "bubblewrap" | "docker";
+  readonly cwd: string;
   private readonly prefix: string[];
   private readonly searchBinaries = new Set<string>();
   private readonly statCache = new Map<string, boolean>();
-  constructor(readonly cwd: string) {
+  constructor(hostCwd: string, private readonly environment?: TaskEnvironment) {
+    this.kind = environment ? "docker" : "bubblewrap";
+    this.cwd = environment ? environment.workdir : WORKSPACE_MOUNT;
+    if (environment) { this.prefix = this.dockerPrefix(hostCwd, environment); return; }
     this.prefix = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL"];
-    for (const path of ["/usr", "/bin", "/lib", "/lib64"]) {
+    // /etc/alternatives holds the targets of Debian alternatives links such as awk, cc and java;
+    // the JDK reads its security/config files through /etc/java-*-openjdk. Both are read-only system config.
+    const jdkConfig = readdirSync("/etc").filter((name) => /^java-\d+-openjdk$/.test(name)).map((name) => `/etc/${name}`);
+    for (const path of ["/usr", "/bin", "/lib", "/lib64", "/etc/alternatives", ...jdkConfig]) {
       if (existsSync(path)) this.prefix.push("--ro-bind", path, path);
     }
     this.prefix.push(
@@ -44,10 +70,34 @@ export class WorkspaceSandbox {
       if (binary) { this.prefix.push("--ro-bind", binary, `/opt/rwkv-pi/bin/${name}`); this.searchBinaries.add(name); }
     }
     this.prefix.push(
-      "--bind", resolve(cwd), resolve(cwd), "--chdir", resolve(cwd), "--clearenv",
+      "--bind", resolve(hostCwd), WORKSPACE_MOUNT, "--chdir", WORKSPACE_MOUNT, "--clearenv",
       "--setenv", "HOME", "/home/sandbox", "--setenv", "PATH", "/opt/rwkv-pi/bin:/usr/local/bin:/usr/bin:/bin",
       "--setenv", "LANG", "C.UTF-8", "--",
     );
+  }
+
+  private dockerPrefix(hostCwd: string, env: TaskEnvironment): string[] {
+    const prefix = ["run", "--rm", "-i", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+      "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/sandbox:rw,size=256m", "--pids-limit", "1024",
+      "--memory", "8g", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--entrypoint", "",
+      "-v", `${dockerHostPath(resolve(hostCwd))}:${env.workdir}`, "-w", env.workdir,
+      "-v", `${dockerHostPath(process.execPath)}:/opt/rwkv-pi/bin/node:ro`];
+    for (const name of ["rg", "fd"] as const) {
+      const binary = hostBinary(name);
+      if (binary) { prefix.push("-v", `${dockerHostPath(binary)}:/opt/rwkv-pi/bin/${name}:ro`); this.searchBinaries.add(name); }
+    }
+    prefix.push("-e", "HOME=/home/sandbox", "-e", `PATH=/opt/rwkv-pi/bin:${env.path}`, "-e", "LANG=C.UTF-8");
+    return prefix;
+  }
+
+  /** The launcher argv for one isolated call, and how to end it early. */
+  private launch(argv: string[]): { command: string; args: string[]; env: NodeJS.ProcessEnv; kill: () => void } {
+    if (!this.environment) return { command: "bwrap", args: [...this.prefix, ...argv], env: { PATH: "/usr/bin:/bin" }, kill: () => {} };
+    // Killing the docker client does not stop its container; stop it by name.
+    const name = `rwkv-pi-${randomUUID()}`;
+    const kill = () => { spawn("docker", ["kill", name], { stdio: "ignore", detached: true }).on("error", () => {}).unref(); };
+    const env = { PATH: "/usr/bin:/bin", ...(process.env.HOME ? { HOME: process.env.HOME } : {}), ...(process.env.DOCKER_HOST ? { DOCKER_HOST: process.env.DOCKER_HOST } : {}) };
+    return { command: "docker", args: [...this.prefix, "--name", name, this.environment.image, ...argv], env, kill };
   }
 
   async exec(argv: string[], options: {
@@ -55,11 +105,13 @@ export class WorkspaceSandbox {
   } = {}): Promise<{ exitCode: number; stdout: Buffer; stderr: Buffer }> {
     if (options.signal?.aborted) throw new Error("Sandbox execution aborted.");
     return new Promise((accept, reject) => {
-      const child = spawn("bwrap", [...this.prefix, ...argv], { stdio: "pipe", detached: true, env: { PATH: "/usr/bin:/bin" } });
+      const launched = this.launch(argv);
+      const child = spawn(launched.command, launched.args, { stdio: "pipe", detached: true, env: launched.env });
       const stdout: Buffer[] = [], stderr: Buffer[] = [];
       let size = 0, failure: Error | undefined;
       const stop = (reason: string) => {
         failure ??= new Error(reason);
+        launched.kill();
         if (child.pid) { try { process.kill(-child.pid, "SIGKILL"); } catch { /* Already exited. */ } }
       };
       const abort = () => stop("Sandbox execution aborted.");
@@ -93,7 +145,7 @@ export class WorkspaceSandbox {
 
   async probe(): Promise<void> {
     try { await this.checked(["/opt/rwkv-pi/bin/node", "-e", "process.stdout.write('ready')"]); }
-    catch (error) { throw new Error(`Bubblewrap isolation unavailable; no fallback to host tools. ${String(error)}`); }
+    catch (error) { throw new Error(`${this.kind} isolation unavailable; no fallback to host tools. ${String(error)}`); }
   }
 
   readFile = (path: string) => this.checked(["/opt/rwkv-pi/bin/node", "-e",
@@ -109,9 +161,10 @@ export class WorkspaceSandbox {
   private spawnSearch = (command: string, args: string[]): Spawned => {
     const name = basename(command) === "fdfind" ? "fd" : basename(command);
     if (!this.searchBinaries.has(name)) throw new Error(`${name} is not available inside the sandbox.`);
-    return spawn("bwrap", [...this.prefix, `/opt/rwkv-pi/bin/${name}`, ...args], {
-      stdio: ["ignore", "pipe", "pipe"], env: { PATH: "/usr/bin:/bin" },
-    }) as Spawned;
+    const launched = this.launch([`/opt/rwkv-pi/bin/${name}`, ...args]);
+    const child = spawn(launched.command, launched.args, { stdio: ["ignore", "pipe", "pipe"], env: launched.env }) as Spawned;
+    child.once("exit", (_code, signal) => { if (signal) launched.kill(); });
+    return child;
   };
 
   private isDirectory = async (path: string): Promise<boolean> => {
@@ -134,6 +187,13 @@ export class WorkspaceSandbox {
   private exists = async (path: string): Promise<boolean> => {
     try { await this.access(path); return true; } catch { return false; }
   };
+
+  private listFiles = async (root: string): Promise<string[]> =>
+    JSON.parse((await this.checked(["/opt/rwkv-pi/bin/node", "-e", LIST_FILES_SCRIPT, root,
+      JSON.stringify(SKIPPED_DIRECTORIES), String(MAX_LISTED_FILES)])).toString()) as string[];
+
+  /** The workspace as the agent sees it, for the recall-tolerant tool wrappers. */
+  readonly fs: WorkspaceFs = { readFile: (path) => this.readFile(path), exists: (path) => this.exists(path), listFiles: (root) => this.listFiles(root) };
 
   /** Fail closed when the loaded pi ignores the spawn hook (it would search the host instead). */
   async probeSearch(names: readonly PiToolName[]): Promise<void> {

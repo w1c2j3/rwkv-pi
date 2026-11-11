@@ -10,4 +10,4 @@ if (!existsSync(root)) {
 const actual = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 if (actual !== lock.revision) throw Error("Existing Lightning checkout differs; preserve local work and select the pinned revision explicitly.");
 execFileSync(process.execPath, ["scripts/build-lightning-tokenizer.mjs"], { stdio: "inherit" });
-console.log("Pinned source and native CPU tokenizer ready. The CUDA package is installed separately; see docs/DEPLOYMENT.md.");
+console.log("Pinned source and native CPU tokenizer ready. The CUDA package is installed separately; see README.md (Engine installation).");

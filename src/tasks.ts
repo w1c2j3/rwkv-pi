@@ -1,5 +1,6 @@
 import { isAbsolute, resolve, sep } from "node:path";
 import { PI_TOOL_NAMES, type PiToolName } from "./tools.js";
+import { parseEnvironment, type TaskEnvironment } from "./environment.js";
 
 export type Split = "train" | "validation" | "test" | "smoke";
 export type ToolName = PiToolName;
@@ -15,6 +16,8 @@ export interface Task {
   files: Record<string, string>;
   tools: ToolName[];
   checks: Check[];
+  /** Optional pinned container environment; see environment.ts. */
+  environment?: TaskEnvironment;
 }
 
 export function object(value: unknown): value is Record<string, unknown> {
@@ -43,6 +46,7 @@ export function parseTask(value: unknown): Task {
     || value.tools.some((tool) => !(PI_TOOL_NAMES as readonly unknown[]).includes(tool))) {
     throw new Error(`Task tools must select distinct tools from ${PI_TOOL_NAMES.join(", ")}.`);
   }
+  if (value.environment !== undefined) parseEnvironment(value.environment);
   if (!Array.isArray(value.checks) || !value.checks.length) throw new Error("Task requires independent acceptance checks.");
   for (const check of value.checks) {
     if (!object(check)) throw new Error("Invalid acceptance check.");

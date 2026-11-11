@@ -4,15 +4,22 @@ import { appendFileSync } from "node:fs";
 import { mkdir, readFile, realpath, rename, writeFile } from "node:fs/promises";
 import { dirname, join, resolve, sep } from "node:path";
 import { promisify } from "node:util";
-import { InMemoryCredentialStore, InMemoryModelsStore, type AssistantMessage, type Provider } from "@earendil-works/pi-ai";
-import { createAgentSession, createExtensionRuntime, ModelRuntime, SessionManager, SettingsManager, type ResourceLoader } from "@earendil-works/pi-coding-agent";
+import { InMemoryCredentialStore, InMemoryModelsStore, type AssistantMessage, type Message, type Provider } from "@earendil-works/pi-ai";
+import {
+  createAgentSession, createEditToolDefinition, createExtensionRuntime, createLsToolDefinition, createReadToolDefinition,
+  createWriteToolDefinition, ModelRuntime, SessionManager, SettingsManager, type ResourceLoader, type ToolDefinition,
+} from "@earendil-works/pi-coding-agent";
 import { digest, runtimeProvenance } from "./provenance.js";
 import { object, parseTask, taskPath, type Task } from "./tasks.js";
 import { WorkspaceSandbox } from "./sandbox.js";
+import { materializeEnvironment } from "./environment.js";
 import { parseToolList } from "./tools.js";
 import type { RwkvConfig } from "./config.js";
 import { budgetRwkvRequest, type TokenBudget } from "./token-budget.js";
 import { promptVersion } from "./prompt.js";
+import { repeatedIdenticalCall, repeatedTargetFailure } from "./loop-guard.js";
+import { hostFs, TOLERANT_TOOL_NAMES, withTolerance } from "./tolerant-tools.js";
+import type { createRwkvProvider } from "./provider.js";
 
 const runCommand = promisify(execFile);
 export interface Step {
@@ -25,13 +32,16 @@ export interface RunRecord {
   runId: string;
   task: Task;
   taskSha256: string;
-  role: "teacher" | "student" | "smoke";
+  role: "teacher" | "student" | "smoke" | "question-author";
   model: { provider: string; id: string };
   provenance: ReturnType<typeof runtimeProvenance>;
-  isolation: "bubblewrap" | "none";
+  isolation: "bubblewrap" | "docker" | "none";
   responseAdapter: "none" | "rwkv-json-v1" | "rwkv-xml-v1" | "rwkv-xml-continuation-v2" | "rwkv-json-continuation-v1";
   promptVersion?: string;
-  loopGuard?: { repeatFailureLimit: number };
+  loopGuard?: { repeatFailureLimit: number; identicalCallLimit?: number; targetFailureLimit?: number };
+  /** Recall-tolerant read/edit/write/ls execution (src/tolerant-tools.ts). */
+  toolTolerance?: "rwkv-tolerant-tools-v1";
+  toolCallRecovery?: "pi-native-validation";
   inference?: { deploymentSha256: string; model: string; engineRevision: string; metadataSha256: Record<string, string> };
   startedAt: string;
   finishedAt: string;
@@ -66,23 +76,35 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
   const directory = resolve(options.outputDir, runId);
   const cwd = join(directory, "workspace");
   await mkdir(cwd, { recursive: true });
-  const sandbox = options.sandbox === "none" ? undefined : new WorkspaceSandbox(cwd);
+  if (task.environment && options.sandbox === "none") throw new Error("Environment tasks always run in their container.");
+  const sandbox = options.sandbox === "none" ? undefined : new WorkspaceSandbox(cwd, task.environment);
+  // The agent and the checks see the workspace at the sandbox's path (the image workdir for containers).
+  const agentCwd = sandbox?.cwd ?? cwd;
   await sandbox?.probe();
   await sandbox?.probeSearch(task.tools);
+  if (task.environment) await materializeEnvironment(task.environment, cwd);
   for (const [path, content] of Object.entries(task.files)) {
     const target = taskPath(cwd, path);
     await mkdir(dirname(target), { recursive: true });
     await writeFile(target, content, { flag: "wx" });
   }
   const { id: _id, split: _split, ...definition } = task;
+  // Tags createRwkvProvider adds; absent for teacher and other providers.
+  const rwkv = options.provider as Partial<ReturnType<typeof createRwkvProvider>>;
+  const identicalCallLimit = rwkv.rwkvPiIdenticalCallLimit ?? 0;
+  const targetFailureLimit = rwkv.rwkvPiTargetFailureLimit ?? 0;
+  const tolerant = rwkv.rwkvPiToolTolerance === true;
   const record: RunRecord = {
     schemaVersion: 1, runId, task, taskSha256: digest(definition), role: options.role,
     model: { provider: model.provider, id: model.id }, provenance: runtimeProvenance(),
     isolation: sandbox?.kind ?? "none",
-    responseAdapter: "rwkvPiToolFormat" in options.provider ? options.provider.rwkvPiToolFormat === "json" ? "rwkv-json-continuation-v1" : options.provider.rwkvPiToolFormat === "xml" ? "rwkv-xml-continuation-v2" : "none" : "none",
-    ...("rwkvPiToolFormat" in options.provider && ["xml", "json"].includes(String(options.provider.rwkvPiToolFormat)) ? { promptVersion: promptVersion(options.provider.rwkvPiToolFormat === "json" ? "json" : "xml") } : {}),
-    ...("rwkvPiRepeatFailureLimit" in options.provider && typeof options.provider.rwkvPiRepeatFailureLimit === "number"
-      ? { loopGuard: { repeatFailureLimit: options.provider.rwkvPiRepeatFailureLimit } } : {}),
+    responseAdapter: rwkv.rwkvPiToolFormat === "json" ? "rwkv-json-continuation-v1" : rwkv.rwkvPiToolFormat === "xml" ? "rwkv-xml-continuation-v2" : "none",
+    ...(rwkv.rwkvPiToolFormat === "xml" || rwkv.rwkvPiToolFormat === "json" ? { promptVersion: promptVersion(rwkv.rwkvPiToolFormat) } : {}),
+    ...(rwkv.rwkvPiRepeatFailureLimit !== undefined
+      ? { loopGuard: { repeatFailureLimit: rwkv.rwkvPiRepeatFailureLimit, ...(identicalCallLimit ? { identicalCallLimit } : {}),
+        ...(targetFailureLimit ? { targetFailureLimit } : {}) } } : {}),
+    ...(tolerant ? { toolTolerance: "rwkv-tolerant-tools-v1" as const } : {}),
+    ...(rwkv.rwkvPiToolCallRecovery ? { toolCallRecovery: "pi-native-validation" as const } : {}),
     ...(options.inference ? { inference: options.inference } : {}),
     startedAt: new Date().toISOString(), finishedAt: "", budget: { maxRequests: options.maxRequests, timeoutMs: options.timeoutMs },
     generation: { contextWindow: model.contextWindow, maxTokens: model.maxTokens, thinkingLevel: options.thinkingLevel ?? "high" },
@@ -112,10 +134,20 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
   });
   modelRuntime.registerNativeProvider(options.provider);
   const { session } = await createAgentSession({
-    cwd, agentDir: join(directory, "agent"), modelRuntime, model, thinkingLevel: options.thinkingLevel ?? "high",
-    settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(cwd), tools: parseToolList(task.tools),
-    customTools: sandbox?.tools(task.tools),
+    cwd: agentCwd, agentDir: join(directory, "agent"), modelRuntime, model, thinkingLevel: options.thinkingLevel ?? "high",
+    settingsManager, resourceLoader, sessionManager: SessionManager.inMemory(agentCwd), tools: parseToolList(task.tools),
+    customTools: tolerant ? tolerantTools(sandbox?.tools(task.tools) ?? hostTools(cwd, task.tools), agentCwd, sandbox?.fs ?? hostFs) : sandbox?.tools(task.tools),
   });
+  if (identicalCallLimit || targetFailureLimit) {
+    const previousBefore = session.agent.beforeToolCall;
+    session.agent.beforeToolCall = async (context, signal) => {
+      const messages = context.context.messages as readonly Message[];
+      const { name, arguments: args } = context.toolCall;
+      const reason = (identicalCallLimit ? repeatedIdenticalCall(messages, name, args, identicalCallLimit) : undefined)
+        ?? (targetFailureLimit ? repeatedTargetFailure(messages, name, args, targetFailureLimit) : undefined);
+      return reason ? { block: true, reason } : previousBefore?.(context, signal);
+    };
+  }
   let interrupted: "budget_exhausted" | "timeout" | undefined;
   let incompleteGeneration: string | undefined;
   let lastAssistant: AssistantMessage | undefined;
@@ -184,7 +216,7 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
         if (check.type === "file_equals") {
           const path = taskPath(cwd, check.path);
           if (sandbox) {
-            const actual = (await sandbox.readFile(path)).toString("utf8");
+            const actual = (await sandbox.readFile(taskPath(agentCwd, check.path))).toString("utf8");
             record.checks.push({ passed: actual === check.expected, detail: `file_equals:${check.path}` });
             continue;
           }
@@ -215,4 +247,17 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
   await writeFile(path + ".tmp", JSON.stringify(record, null, 2) + "\n", { mode: 0o600 });
   await rename(path + ".tmp", path);
   return { record, path };
+}
+
+/** Unsandboxed runs: pi's host definitions of the tools the tolerant wrappers cover. */
+function hostTools(cwd: string, names: readonly string[]): ToolDefinition[] {
+  const make: Record<string, () => unknown> = {
+    read: () => createReadToolDefinition(cwd), write: () => createWriteToolDefinition(cwd),
+    edit: () => createEditToolDefinition(cwd), ls: () => createLsToolDefinition(cwd),
+  };
+  return names.filter((name) => make[name]).map((name) => make[name]!()) as ToolDefinition[];
+}
+
+function tolerantTools(tools: ToolDefinition[], cwd: string, fs: typeof hostFs): ToolDefinition[] {
+  return tools.map((tool) => (TOLERANT_TOOL_NAMES.includes(tool.name) ? withTolerance(tool, cwd, fs) : tool));
 }

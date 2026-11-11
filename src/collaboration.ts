@@ -288,29 +288,30 @@ const VERDICT_LABEL: Record<FileVerdict, string> = {
 };
 
 /** Human-readable report: what RWKV did, what Qwen changed on top of it, and the evidence. */
-export function renderMarkdown(record: CollaborationRecord, options: { diffs?: boolean } = {}): string {
+export function renderMarkdown(record: CollaborationRecord, options: { diffs?: boolean; teacherLabel?: string } = {}): string {
   const out: string[] = [];
+  const teacher = options.teacherLabel || "Qwen";
   const s = record.summary;
   out.push(`# Collaboration ${record.id}`, "");
   out.push(`Task: ${record.task.id}`, "");
   out.push("| | model | status | requests |", "|---|---|---|---|");
   out.push(`| RWKV (first) | ${record.rwkv.model} | ${record.rwkv.status}${record.rwkv.error ? ` (${short(record.rwkv.error, 80)})` : ""} | ${record.rwkv.requests ?? "-"} |`);
-  out.push(`| Qwen (continues) | ${record.qwen.model} | ${record.qwen.status}${record.qwen.error ? ` (${short(record.qwen.error, 80)})` : ""} | ${record.qwen.requests ?? "-"} |`);
+  out.push(`| ${teacher} (continues) | ${record.qwen.model} | ${record.qwen.status}${record.qwen.error ? ` (${short(record.qwen.error, 80)})` : ""} | ${record.qwen.requests ?? "-"} |`);
   out.push("");
   out.push(`Acceptance: ${record.acceptance.verified ? "independently verified" : "NOT verified"} — ${record.acceptance.note}`);
   for (const check of record.acceptance.checks) out.push(`- ${check.passed ? "pass" : "FAIL"}: ${short(check.detail, 140)}`);
   out.push("");
-  out.push("## What Qwen changed in RWKV's work", "");
-  out.push(`${s["qwen-corrected"]} file(s) corrected, ${s["qwen-reverted"]} reverted, ${s["qwen-only"]} changed only by Qwen, ${s["rwkv-kept"]} RWKV edit(s) kept as is.`);
-  out.push(`Of the lines RWKV wrote, Qwen kept ${s.rwkvLinesKept} and discarded ${s.rwkvLinesDiscarded}; Qwen added ${s.qwenLinesAdded} line(s).`, "");
+  out.push(`## What ${teacher} changed in RWKV's work`, "");
+  out.push(`${s["qwen-corrected"]} file(s) corrected, ${s["qwen-reverted"]} reverted, ${s["qwen-only"]} changed only by ${teacher}, ${s["rwkv-kept"]} RWKV edit(s) kept as is.`);
+  out.push(`Of the lines RWKV wrote, ${teacher} kept ${s.rwkvLinesKept} and discarded ${s.rwkvLinesDiscarded}; ${teacher} added ${s.qwenLinesAdded} line(s).`, "");
   if (record.files.length) {
-    out.push("| file | verdict | RWKV (+/-) | Qwen (+/-) | RWKV lines kept / discarded |", "|---|---|---|---|---|");
+    out.push(`| file | verdict | RWKV (+/-) | ${teacher} (+/-) | RWKV lines kept / discarded |`, "|---|---|---|---|---|");
     for (const f of record.files) {
-      out.push(`| ${f.path} | ${VERDICT_LABEL[f.verdict]} | ${f.rwkv.existence === "same" ? "-" : `+${f.rwkv.added}/-${f.rwkv.removed}`} | ${f.qwen.existence === "same" ? "-" : `+${f.qwen.added}/-${f.qwen.removed}`} | ${f.rwkvLinesKept}/${f.rwkvLinesDiscarded} |`);
+      out.push(`| ${f.path} | ${VERDICT_LABEL[f.verdict].replaceAll("Qwen", teacher)} | ${f.rwkv.existence === "same" ? "-" : `+${f.rwkv.added}/-${f.rwkv.removed}`} | ${f.qwen.existence === "same" ? "-" : `+${f.qwen.added}/-${f.qwen.removed}`} | ${f.rwkvLinesKept}/${f.rwkvLinesDiscarded} |`);
     }
     out.push("");
   } else out.push("No file changes by either model.", "");
-  for (const [name, who] of [["RWKV", record.rwkv], ["Qwen", record.qwen]] as const) {
+  for (const [name, who] of [["RWKV", record.rwkv], [teacher, record.qwen]] as const) {
     out.push(`## ${name} actions (${who.actions.length})`, "");
     for (const action of who.actions.slice(0, 40)) out.push(`- \`${action.tool}\` ${action.summary}${action.failed ? " — **error**" : ""}`);
     if (who.actions.length > 40) out.push(`- … ${who.actions.length - 40} more`);
@@ -320,7 +321,7 @@ export function renderMarkdown(record: CollaborationRecord, options: { diffs?: b
   if (options.diffs !== false) {
     for (const f of record.files) {
       if (f.rwkvDiff) out.push(`### ${f.path}: RWKV's change`, "", "```diff", f.rwkvDiff.trimEnd(), "```", "");
-      if (f.qwenDiff) out.push(`### ${f.path}: Qwen's correction`, "", "```diff", f.qwenDiff.trimEnd(), "```", "");
+      if (f.qwenDiff) out.push(`### ${f.path}: ${teacher}'s correction`, "", "```diff", f.qwenDiff.trimEnd(), "```", "");
     }
   }
   if (record.skipped.length) {
