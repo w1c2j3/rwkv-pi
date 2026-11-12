@@ -125,6 +125,40 @@ npm test               # build, then the Node suites (sandbox-search skips unles
 npm run test:source    # the suites that need the patched Pi source; REQUIRE_SANDBOX_TESTS=1 makes skips fail
 npm run smoke          # end-to-end smoke tasks against the mock engine
 python3 -m unittest discover -s test -p 'test_*.py'
+python3 -B -m unittest discover -s rwkvdata/tests -t .                     # Harbor data lane
+python3 -B -m unittest data_pipeline.test_pipeline data_pipeline.test_products data_pipeline.test_collection
+node --test data_pipeline/test_delegation.mjs
 ```
 
-Test results show that the software behaves correctly. They are not evidence of model capability.
+The committed tests use tiny engineering-only inputs, never corpus questions. Test results show that the software
+behaves correctly; they are not evidence of model capability. Actual model execution, acceptance, tokenization and
+training require separately provided private artifacts and authorization.
+
+## Data products and documentation
+
+One branch carries the client and the data pipeline (`data_pipeline/`, `rwkvdata/`); both use the renderer and the
+Lightning-native tokenizer from this package, so there is no second protocol implementation.
+
+| Module | Job |
+| --- | --- |
+| `data_pipeline/` | Two-output pipeline: frozen question packages, and those packages plus teacher trajectories and reviewed training files ([guide](data_pipeline/README.md), [outputs](data_pipeline/outputs.md)) |
+| `rwkvdata/` | Harbor lane: bundle → multi-step Harbor task export, fault injection, Pi teacher agent, ATIF merge, trajectory QC, DSH task import (`python -m rwkvdata --help`) |
+
+Frozen questions and reviewed teacher trajectories are separate products; multiple explicitly configured teachers
+can answer the same question snapshot while keeping their training files separate. DeepSeek is the default teacher.
+
+## Repository boundary
+
+GitHub contains **code only**, even when the repository is private. Paid/self-authored questions, question
+generators, initial task files, reference answers, task-specific acceptance checks, model trajectories, datasets and
+evaluation reports stay on private storage. The file allowlist, local Git hooks and CI check the complete commit
+history so private assets are not reintroduced. Every newly allowed file still needs content review:
+
+```bash
+git config core.hooksPath .githooks
+python3 -B scripts/check-code-only.py --refs HEAD
+```
+
+Human-facing documentation is English. Questions, fixtures, model-facing prompts, Chinese reasoning instructions,
+and training data remain in their original Chinese. Local private `CLAUDE.md` and `docs/HANDOFF.md` provide operator
+context and current state; keep them ignored rather than adding them to the GitHub allowlist.
