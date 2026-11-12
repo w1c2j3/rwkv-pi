@@ -31,3 +31,13 @@ npm test
 
 The committed tests use tiny engineering-only inputs, never corpus questions. Actual model execution,
 acceptance, tokenization and training require separately provided private artifacts and authorization.
+
+## Data products and documentation
+
+See [the data pipeline guide](data_pipeline/README.md) and [the two output modes](data_pipeline/outputs.md).
+Frozen questions and reviewed teacher trajectories are separate products; multiple explicitly configured teachers
+can answer the same question snapshot while keeping their training files separate. DeepSeek is the default teacher.
+
+Human-facing documentation is English. Questions, fixtures, model-facing prompts, Chinese reasoning instructions,
+and training data remain in their original Chinese. Local private `CLAUDE.md` and `docs/HANDOFF.md` provide operator
+context and current state; keep them ignored rather than adding them to the GitHub allowlist.
