@@ -17,7 +17,8 @@ jobs:
           python-version: '3.12'
       - run: python -m pip install -r inference/requirements.txt
       - run: python -m unittest discover -s test -p test_xml_protocol.py -v
-      - run: python -B -m unittest data_pipeline.test_pipeline data_pipeline.test_products data_pipeline.test_collection -v
+      # data_pipeline.test_pipeline/test_products write only to the mounted F: data root by design; run them locally.
+      - run: python -B -m unittest discover -s rwkvdata/tests -t . -v
       - run: npm ci
       - run: npm run check
       - run: npm test
