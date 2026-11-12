@@ -12,7 +12,7 @@
 !/test/
 !/.github/workflows/
 !/patches/lightning/
-!/patches/pi-next/
+!/patches/pi/
 !/docs/
 !/tasks/
 !/test/helpers/
@@ -34,13 +34,12 @@
 !/docs/protocol.md
 !/docs/workflows.md
 !/inference/requirements.txt
-!/inference/rwkv_xml_parser.py
 !/inference/xml_protocol.py
 !/lightning-source.lock.json
 !/package-lock.json
 !/package.json
 !/patches/lightning/0001-continuous-trajectory-labels.patch
-!/patches/pi-next/0001-sandboxable-search-tools.patch
+!/patches/pi/0001-sandboxable-search-tools.patch
 !/pi-source.lock.json
 !/pipeline/compile-lightning-dataset.mjs
 !/pipeline/datakit.py
@@ -49,6 +48,7 @@
 !/scripts/build-lightning-tokenizer.mjs
 !/scripts/check-code-only.py
 !/scripts/install-lightning.py
+!/scripts/install.sh
 !/scripts/run-pi-source.mjs
 !/scripts/setup-lightning.mjs
 !/scripts/setup-pi-source.mjs
@@ -57,6 +57,7 @@
 !/src/cli.ts
 !/src/collab-extension.ts
 !/src/collab-trace.ts
+!/src/doctor.ts
 !/src/collaboration-cli.ts
 !/src/collaboration.ts
 !/src/config.ts
@@ -98,6 +99,7 @@
 !/test/auto-collab.test.mjs
 !/test/collaboration.test.mjs
 !/test/config.test.mjs
+!/test/doctor.test.mjs
 !/test/deepseek-teacher.test.mjs
 !/test/harness.test.mjs
 !/test/helpers/mock-server.mjs

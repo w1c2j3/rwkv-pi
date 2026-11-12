@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
+import { requireDataRoot } from "./config.js";
 
 export type Actor = "rwkv" | "teacher";
 export interface WorkCounters { responses: number; inputTokens: number; outputTokens: number; unknownUsage: number; toolCalls: number; toolErrors: number }
@@ -31,8 +32,7 @@ export class ProjectParticipation {
     subagents: Record<string, { counts: WorkCounters; state: string }>;
     fileEdits: { actor: Actor; path: string }[]; plans: unknown[];
   };
-  constructor(cwd: string, mode: string, teacherModel: string, dataRoot = process.env.RWKV_PI_DATA_ROOT || "/mnt/f/rwkv-pi-data") {
-    if (!existsSync(dataRoot)) throw new Error("Project participation requires the existing F: data root.");
+  constructor(cwd: string, mode: string, teacherModel: string, dataRoot = requireDataRoot()) {
     const git = spawnSync("git", ["-C", cwd, "rev-parse", "--show-toplevel"], { encoding: "utf8" });
     this.project = realpathSync(git.status === 0 ? git.stdout.trim() : cwd);
     const key = createHash("sha256").update(this.project).digest("hex").slice(0, 24);

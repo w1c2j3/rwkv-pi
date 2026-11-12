@@ -6,7 +6,7 @@ import { parseArgs } from "node:util";
 import { renderPrompt, PROMPT_VERSION } from "../dist/prompt.js";
 import { sha256 } from "../dist/provenance.js";
 
-const { values: a } = parseArgs({ options: { dataset: { type: "string" }, out: { type: "string" }, tokenizer: { type: "string", default: "artifacts/lightning-migration/tokenize-native" }, vocab: { type: "string", default: ".upstream/rwkv-lightning/assets/rwkv_vocab_v20230424.txt" }, "max-tokens": { type: "string", default: "0" } } });
+const { values: a } = parseArgs({ options: { dataset: { type: "string" }, out: { type: "string" }, tokenizer: { type: "string", default: ".upstream/lightning-tokenizer/tokenize-native" }, vocab: { type: "string", default: ".upstream/rwkv-lightning/assets/rwkv_vocab_v20230424.txt" }, "max-tokens": { type: "string", default: "0" } } });
 if (!a.dataset || !a.out) throw Error("Usage: npm run tokenize -- --dataset datasets/verified --out datasets/lightning-v2");
 const lock = JSON.parse(await readFile("lightning-source.lock.json", "utf8"));
 const vocabHash = sha256(await readFile(a.vocab));

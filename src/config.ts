@@ -1,4 +1,6 @@
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join, resolve } from "node:path";
 
 export interface RwkvConfig {
   backend: "lightning" | "openai";
@@ -8,7 +10,7 @@ export interface RwkvConfig {
   contextWindow: number;
   maxTokens: number;
   toolFormat: "xml" | "json" | "native";
-  promptTemplate: "xml" | "json" | "irwkv" | "g1";
+  promptTemplate: "xml" | "json" | "g1";
   repeatFailureLimit: number;
   /** Pass envelope-complete but invalid calls to pi's native validation (tool error result) instead of aborting the turn. */
   toolCallRecovery: boolean;
@@ -24,6 +26,22 @@ export interface RwkvConfig {
 }
 
 /** Unsigned decimal integer from the environment, at least `min`. */
+/** Where traces and participation records go: RWKV_PI_DATA_ROOT, else $XDG_DATA_HOME/rwkv-pi, else ~/.local/share/rwkv-pi. */
+export function dataRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const explicit = env.RWKV_PI_DATA_ROOT?.trim();
+  if (explicit) return resolve(explicit);
+  return resolve(env.XDG_DATA_HOME?.trim() || join(homedir(), ".local", "share"), "rwkv-pi");
+}
+
+/** The data root, ready for writing. An explicit root must already exist: an unmounted disk never silently falls back. */
+export function requireDataRoot(env: NodeJS.ProcessEnv = process.env): string {
+  const root = dataRoot(env);
+  if (env.RWKV_PI_DATA_ROOT?.trim()) {
+    if (!existsSync(root)) throw new Error(`Data root ${root} is not available; mount it or change RWKV_PI_DATA_ROOT.`);
+  } else mkdirSync(root, { recursive: true });
+  return root;
+}
+
 export function envInteger(env: NodeJS.ProcessEnv, name: string, fallback: number, min: number): number {
   const raw = env[name]?.trim();
   if (!raw) return fallback;
@@ -56,7 +74,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
   const toolFormat = env.RWKV_TOOL_FORMAT?.trim() || (backend === "lightning" ? "xml" : "native");
   if (backend === "lightning" ? !["xml", "json"].includes(toolFormat) : toolFormat !== "native") throw new Error("Lightning requires client XML or JSON parsing; legacy OpenAI requires native tool calls.");
   const promptTemplate = env.RWKV_PROMPT_TEMPLATE?.trim() || (toolFormat === "json" ? "json" : "xml");
-  if (!["xml", "json", "irwkv", "g1"].includes(promptTemplate)) throw new Error("RWKV_PROMPT_TEMPLATE must be xml, json, irwkv or g1.");
+  if (!["xml", "json", "g1"].includes(promptTemplate)) throw new Error("RWKV_PROMPT_TEMPLATE must be xml, json or g1.");
   if (backend === "lightning" && promptTemplate !== toolFormat) throw new Error("Lightning prompt template must match its tool format.");
   const maxTokens = positiveInteger("RWKV_MAX_TOKENS", 8192);
   const repeatFailureLimit = envInteger(env, "RWKV_REPEAT_FAILURE_LIMIT", 3, 0);

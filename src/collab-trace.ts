@@ -3,6 +3,7 @@ import { appendFileSync, existsSync, lstatSync, mkdirSync, readdirSync, readFile
 import { join, relative, resolve } from "node:path";
 import { buildRecord, finalAnswer, renderMarkdown, toolActions, type Tree } from "./collaboration.js";
 import type { StallReason } from "./stall-detector.js";
+import { dataRoot } from "./config.js";
 
 const ignored = new Set([".git", ".upstream", "node_modules", ".venv", "venv", "__pycache__", ".pytest_cache", ".mypy_cache", ".pi"]);
 /** Bounded, best-effort evidence snapshot. Never copies a workspace or changes its contents. */
@@ -35,7 +36,7 @@ export function snapshot(root: string, exclude: readonly string[] = []): Tree {
 }
 
 export function collaborationDataRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const root = resolve(env.RWKV_PI_DATA_ROOT || "/mnt/f/rwkv-pi-data");
+  const root = dataRoot(env);
   if (!existsSync(root)) throw new Error(`Collaboration data root unavailable: ${root}`);
   return root;
 }

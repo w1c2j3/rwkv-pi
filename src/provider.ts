@@ -6,10 +6,8 @@ import { withRwkvTransport } from "./transport.js";
 export { readConfig, type RwkvConfig } from "./config.js";
 
 export function createRwkvModel(config: RwkvConfig = readConfig()): Model<"openai-completions"> {
-  const templateKwargs = (thinking: boolean) => config.promptTemplate !== "irwkv"
-    // The author's tokenizer has no BOS. Override our converted tokenizer's EOS-as-BOS default.
-    ? { fake_cot_mode: !thinking, thinking, bos_token: "" }
-    : { fake_cot_mode: !thinking };
+  // The author's tokenizer has no BOS. Override our converted tokenizer's EOS-as-BOS default.
+  const templateKwargs = (thinking: boolean) => ({ fake_cot_mode: !thinking, thinking, bos_token: "" });
   return {
     id: config.modelId,
     name: `RWKV (${config.modelId})`,

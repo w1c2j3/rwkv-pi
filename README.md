@@ -25,26 +25,37 @@ are byte-identical.
 - Node.js 22.19 or newer.
 - A running `rwkv_lightning_cuda` server. The pinned build is described in `lightning-source.lock.json`.
 - Linux with bubblewrap for isolated harness runs and sandboxed subagents.
-- Python 3 for the optional engine installer and the inference-side parser in `inference/`.
+- git and g++ (the installer builds the pinned Lightning tokenizer from source).
+- Python 3 for the optional engine installer and the Python parser port in `inference/`.
 
 ## Quick start
 
 ```bash
-npm ci
-npm run pi:setup                 # fetch and patch the pinned Pi source (pi-source.lock.json)
-cp .env.example .env             # then point RWKV_BASE_URL at your engine
-npm run build
+npm run setup                    # = scripts/install.sh: npm ci, patched Pi source, pinned Lightning tokenizer, .env, offline doctor
+$EDITOR .env                     # point RWKV_BASE_URL / RWKV_MODEL at your rwkv_lightning_cuda engine
+npm run doctor                   # one-screen check, including the live engine and tokenizer parity
 npm run start:source -- --offline --thinking off
 ```
 
 Pass `--thinking high` to enable reasoning. `source scripts/activate-pi.sh` exposes the pinned launcher as `pi`
 in the current shell. Exported variables override values in `.env`.
 
+`npm run doctor` checks Node, the pinned Pi commit and its applied patches, the Lightning-native tokenizer build and
+vocabulary hash, configuration, the data root, bubblewrap and, unless `--offline`, the engine's `/v1/models` and
+`/v1/tokens/count`. When both are available it requires the offline tokenizer and the engine to agree on a probe,
+so packed training data and served prompts tokenize identically. It exits non-zero on any failure.
+
+### Tokenizer
+
+RWKV token counts come only from the Lightning-native tokenizer: online through the engine's `/v1/tokens/count`, and
+offline (dataset packing) through the same upstream `trie.h` built by `npm run lightning:tokenizer` into
+`.upstream/lightning-tokenizer/`. No Hugging Face, irwkv or vLLM tokenizer is used anywhere in the RWKV path.
+
 ## Configuration
 
 | Variable | Default | Purpose |
 | --- | --- | --- |
-| `RWKV_BACKEND` | `lightning` | `lightning` (client-side parsing) or `openai` (legacy native tool calls) |
+| `RWKV_BACKEND` | `lightning` | `lightning` for RWKV. `openai` exists only for teacher models and test mocks; it has no RWKV token budget |
 | `RWKV_BASE_URL` | `http://127.0.0.1:8000/v1` | Engine API root |
 | `RWKV_MODEL` | `rwkv7` | Model identity reported to Pi |
 | `RWKV_API_KEY` / `RWKV_API_KEY_FILE` | `rwkv-local` | Engine credential |
@@ -60,7 +71,7 @@ in the current shell. Exported variables override values in `.env`.
 | `RWKV_TOOL_CALL_RECOVERY` | `1` | Hand malformed but complete calls to Pi's validator instead of aborting |
 | `RWKV_ADAPTER_ID`, `_VERSION`, `_SCALE` | unset | Optional adapter selection on the engine |
 | `RWKV_PLUGINS` | `none` | `strong-model`, `subagents`, or both, comma-separated |
-| `RWKV_PI_DATA_ROOT` | `/mnt/f/rwkv-pi-data` | Where collaboration traces and participation records are written. Set this on every new machine. |
+| `RWKV_PI_DATA_ROOT` | `$XDG_DATA_HOME/rwkv-pi` (`~/.local/share/rwkv-pi`) | Collaboration traces and participation records. An explicitly set root must exist; it never falls back to another disk. |
 
 Teacher, subagent, and stall-detection settings are listed in [workflows](docs/workflows.md).
 Input is never silently truncated: `/v1/tokens/count` measures the prompt, and the request fails if the
@@ -99,7 +110,7 @@ not from a similarly named release.
 | --- | --- |
 | `src/` | Provider, renderer, parser, harness, sandbox, collaboration and subagent extensions, CLIs |
 | `test/` | Node test suites with a mock engine (`test/helpers/mock-server.mjs`) |
-| `inference/` | Python XML tool parser for serving-side integration, with tests |
+| `inference/` | Python port of the XML parser (`xml_protocol.py`) for Python-side QC, with tests |
 | `pipeline/` | Native-tokenizer packing (`compile-lightning-dataset.mjs`, `trajectory-packing.mjs`) |
 | `scripts/` | Pi/engine setup, tokenizer build, smoke run |
 | `patches/` | Reviewed patches applied to the pinned Pi and Lightning sources |
@@ -110,11 +121,10 @@ not from a similarly named release.
 
 ```bash
 npm run check          # type-check
-npm test               # build, then run the Node test suites
+npm test               # build, then the Node suites (sandbox-search skips unless Pi is patched)
+npm run test:source    # the suites that need the patched Pi source; REQUIRE_SANDBOX_TESTS=1 makes skips fail
 npm run smoke          # end-to-end smoke tasks against the mock engine
 python3 -m unittest discover -s test -p 'test_*.py'
 ```
 
-`npm test` also globs `pipeline/test/`. That directory belongs to the data pipeline, which this repository does not
-include, so name the test files explicitly when you run without it. Test results show that the software behaves
-correctly. They are not evidence of model capability.
+Test results show that the software behaves correctly. They are not evidence of model capability.

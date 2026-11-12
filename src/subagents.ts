@@ -12,7 +12,7 @@ import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, re
 import { homedir } from "node:os";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { envInteger, readConfig } from "./config.js";
+import { dataRoot, envInteger, readConfig } from "./config.js";
 import { countMessage, emptyCounters, type WorkCounters } from "./project-participation.js";
 
 export const SUBAGENT_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
@@ -34,7 +34,7 @@ export function subagentLimits(env: NodeJS.ProcessEnv = process.env): SubagentLi
 }
 
 export function subagentRoot(env: NodeJS.ProcessEnv = process.env): string {
-  const data = resolve(env.RWKV_PI_DATA_ROOT || "/mnt/f/rwkv-pi-data");
+  const data = dataRoot(env);
   // Never fall back to other storage when the data root is unavailable.
   if (!existsSync(data)) throw new Error(`Subagent data root unavailable: ${data}`);
   return join(data, "runs", "subagents");

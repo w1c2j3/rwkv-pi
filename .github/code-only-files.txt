@@ -24,6 +24,7 @@ package-lock.json
 package.json
 patches/lightning/0001-continuous-trajectory-labels.patch
 patches/pi-next/0001-sandboxable-search-tools.patch
+patches/pi/0001-sandboxable-search-tools.patch
 pi-source.lock.json
 pipeline/compile-lightning-dataset.mjs
 pipeline/datakit.py
@@ -32,6 +33,7 @@ scripts/activate-pi.sh
 scripts/build-lightning-tokenizer.mjs
 scripts/check-code-only.py
 scripts/install-lightning.py
+scripts/install.sh
 scripts/run-pi-source.mjs
 scripts/setup-lightning.mjs
 scripts/setup-pi-source.mjs
@@ -45,6 +47,7 @@ src/collaboration.ts
 src/config.ts
 src/dataset-cli.ts
 src/dataset.ts
+src/doctor.ts
 src/environment.ts
 src/extension.ts
 src/harness-cli.ts
@@ -82,6 +85,7 @@ test/auto-collab.test.mjs
 test/collaboration.test.mjs
 test/config.test.mjs
 test/deepseek-teacher.test.mjs
+test/doctor.test.mjs
 test/harness.test.mjs
 test/helpers/mock-server.mjs
 test/integration.test.mjs

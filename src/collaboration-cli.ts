@@ -16,20 +16,18 @@ import {
 } from "./collaboration.js";
 import { runTask, type RunRecord } from "./harness.js";
 import { createRwkvProvider, readConfig } from "./provider.js";
+import { requireDataRoot } from "./config.js";
 import { parseTasks } from "./tasks.js";
 import { createTeacherProvider } from "./teacher.js";
 
 const USAGE = `Usage:
   npm run collab -- run --task task.jsonl [--out DIR] [--max-requests 32] [--timeout-ms 900000] [--thinking high|off] [--qwen-always]
   npm run collab -- report --rwkv-run RWKV/run.json --qwen-run QWEN/run.json [--out DIR]
-  npm run collab -- scan --runs /mnt/f/rwkv-pi-data/runs/<wave> [--out DIR]
-Output defaults to $RWKV_PI_DATA_ROOT/runs/collaboration (RWKV_PI_DATA_ROOT defaults to /mnt/f/rwkv-pi-data).`;
+  npm run collab -- scan --runs <data-root>/runs/<wave> [--out DIR]
+Output defaults to $RWKV_PI_DATA_ROOT/runs/collaboration (RWKV_PI_DATA_ROOT defaults to ~/.local/share/rwkv-pi).`;
 
 export function dataRoot(): string {
-  const root = resolve(process.env.RWKV_PI_DATA_ROOT ?? "/mnt/f/rwkv-pi-data");
-  // Never fall back to another disk when the data root is unavailable.
-  if (!existsSync(root)) throw new Error(`Data root ${root} is not available; set RWKV_PI_DATA_ROOT.`);
-  return root;
+  return requireDataRoot();
 }
 
 export function participant(record: RunRecord, path: string, raw: Buffer): Participant {

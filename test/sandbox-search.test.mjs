@@ -33,7 +33,7 @@ test("sandboxed grep/find/ls match pi's host output and cannot read outside the 
   const sandbox = new WorkspaceSandbox(cwd);
   try { await sandbox.probe(); await sandbox.probeSearch(["grep", "find"]); }
   catch (error) {
-    if (process.env.REQUIRE_SANDBOX_TESTS === "1" || !/spawn bwrap ENOENT|Operation not permitted|No permissions to create|requires (rg|fd)/.test(String(error))) throw error;
+    if (process.env.REQUIRE_SANDBOX_TESTS === "1" || !/spawn bwrap ENOENT|Operation not permitted|No permissions to create|requires (rg|fd)|ignores operations.spawn/.test(String(error))) throw error;
     t.skip(String(error)); return;
   }
   const [grep, find, ls] = sandbox.tools(["grep", "find", "ls"]);
@@ -57,7 +57,9 @@ test("sandboxed grep/find/ls match pi's host output and cannot read outside the 
   assert.doesNotMatch(leaked, /outside the workspace/);
   assert.doesNotMatch(await run(grep, { pattern: "root", path: "/etc" }), /passwd/);
   assert.doesNotMatch(await run(find, { pattern: "secret.txt", path: root }), /secret\.txt/);
-  // bwrap creates the workspace's parent directories empty: only the workspace itself is visible.
-  assert.equal(await run(ls, { path: root }), "workspace/");
+  // The workspace is mounted at a fixed sandbox path, so the host's parent directory does not exist inside.
+  const parent = await run(ls, { path: root });
+  assert.match(parent, /^ERROR Path not found/);
+  assert.doesNotMatch(parent, /secret\.txt/);
   assert.match(await run(host.ls, { path: root }), /secret\.txt/);
 });
