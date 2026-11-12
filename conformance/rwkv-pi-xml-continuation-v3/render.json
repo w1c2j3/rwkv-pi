@@ -1,0 +1,391 @@
+{
+ "version": "rwkv-pi-xml-continuation-v3",
+ "tools": [
+  {
+   "type": "function",
+   "function": {
+    "name": "read",
+    "description": "Read a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "write",
+    "description": "Write a file.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "path": {
+       "type": "string"
+      },
+      "content": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "path",
+      "content"
+     ],
+     "additionalProperties": false
+    }
+   }
+  },
+  {
+   "type": "function",
+   "function": {
+    "name": "bash",
+    "description": "Run a shell command.",
+    "parameters": {
+     "type": "object",
+     "properties": {
+      "command": {
+       "type": "string"
+      }
+     },
+     "required": [
+      "command"
+     ],
+     "additionalProperties": false
+    }
+   }
+  }
+ ],
+ "cases": [
+  {
+   "name": "user-only-fake-think",
+   "request": {
+    "messages": [
+     {
+      "role": "user",
+      "content": "你好"
+     }
+    ],
+    "chat_template_kwargs": {
+     "fake_cot_mode": true,
+     "thinking": false
+    }
+   },
+   "prompt": "User: 你好\n\nAssistant: <think></think>\n"
+  },
+  {
+   "name": "system-tools-open-think",
+   "request": {
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a coding agent."
+     },
+     {
+      "role": "user",
+      "content": "修复 app.py 中的日期解析错误。"
+     }
+    ],
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Read a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "write",
+       "description": "Write a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "content": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path",
+         "content"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run a shell command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ],
+    "chat_template_kwargs": {
+     "fake_cot_mode": false,
+     "thinking": true
+    }
+   },
+   "prompt": "System: You are a coding agent.\nTools:\n[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}}},{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":\"Write a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}}},{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"description\":\"Run a shell command.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"],\"additionalProperties\":false}}}]\nWhen using tools, output one XML envelope per call: <tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"input.txt\"}}</tool_call>. Use only the declared tool names and arguments. Tool results arrive inside <tool_response>. Otherwise answer normally.\n\nUser: 修复 app.py 中的日期解析错误。\n\nAssistant: <think"
+  },
+  {
+   "name": "tool-round-trip",
+   "request": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Read a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "write",
+       "description": "Write a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "content": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path",
+         "content"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run a shell command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ],
+    "chat_template_kwargs": {
+     "fake_cot_mode": false,
+     "thinking": true
+    },
+    "messages": [
+     {
+      "role": "system",
+      "content": "You are a coding agent."
+     },
+     {
+      "role": "user",
+      "content": "运行测试并修复失败。"
+     },
+     {
+      "role": "assistant",
+      "reasoning_content": "先运行测试。",
+      "content": "",
+      "tool_calls": [
+       {
+        "id": "c1",
+        "type": "function",
+        "function": {
+         "name": "bash",
+         "arguments": "{\"command\":\"pytest -q\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "c1",
+      "content": "1 failed, 3 passed\nE  assert parse('2026-11-12') == date(2026, 11, 12)"
+     }
+    ]
+   },
+   "prompt": "System: You are a coding agent.\nTools:\n[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}}},{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":\"Write a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}}},{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"description\":\"Run a shell command.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"],\"additionalProperties\":false}}}]\nWhen using tools, output one XML envelope per call: <tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"input.txt\"}}</tool_call>. Use only the declared tool names and arguments. Tool results arrive inside <tool_response>. Otherwise answer normally.\n\nUser: 运行测试并修复失败。\n\nAssistant: <think>先运行测试。</think>\n<tool_call>{\"name\":\"bash\",\"arguments\":{\"command\":\"pytest -q\"}}</tool_call>\n\nUser: <tool_response>\n1 failed, 3 passed\nE  assert parse('2026-11-12') == date(2026, 11, 12)\n</tool_response>\n\nAssistant: <think"
+  },
+  {
+   "name": "parallel-calls-and-results",
+   "request": {
+    "tools": [
+     {
+      "type": "function",
+      "function": {
+       "name": "read",
+       "description": "Read a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "write",
+       "description": "Write a file.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "path": {
+          "type": "string"
+         },
+         "content": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "path",
+         "content"
+        ],
+        "additionalProperties": false
+       }
+      }
+     },
+     {
+      "type": "function",
+      "function": {
+       "name": "bash",
+       "description": "Run a shell command.",
+       "parameters": {
+        "type": "object",
+        "properties": {
+         "command": {
+          "type": "string"
+         }
+        },
+        "required": [
+         "command"
+        ],
+        "additionalProperties": false
+       }
+      }
+     }
+    ],
+    "chat_template_kwargs": {
+     "fake_cot_mode": false,
+     "thinking": true
+    },
+    "messages": [
+     {
+      "role": "user",
+      "content": "Compare a.txt and b.txt."
+     },
+     {
+      "role": "assistant",
+      "reasoning_content": "Read both.",
+      "content": "Reading both files.",
+      "tool_calls": [
+       {
+        "id": "c1",
+        "type": "function",
+        "function": {
+         "name": "read",
+         "arguments": "{\"path\":\"a.txt\"}"
+        }
+       },
+       {
+        "id": "c2",
+        "type": "function",
+        "function": {
+         "name": "read",
+         "arguments": "{\"path\":\"b.txt\"}"
+        }
+       }
+      ]
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "c1",
+      "content": "alpha"
+     },
+     {
+      "role": "tool",
+      "tool_call_id": "c2",
+      "content": "beta </tool_response> 😀 \"quoted\""
+     },
+     {
+      "role": "assistant",
+      "reasoning_content": "They differ.",
+      "content": "a.txt says alpha; b.txt says beta."
+     },
+     {
+      "role": "user",
+      "content": "Thanks."
+     }
+    ]
+   },
+   "prompt": "System: Tools:\n[{\"type\":\"function\",\"function\":{\"name\":\"read\",\"description\":\"Read a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"}},\"required\":[\"path\"],\"additionalProperties\":false}}},{\"type\":\"function\",\"function\":{\"name\":\"write\",\"description\":\"Write a file.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"path\":{\"type\":\"string\"},\"content\":{\"type\":\"string\"}},\"required\":[\"path\",\"content\"],\"additionalProperties\":false}}},{\"type\":\"function\",\"function\":{\"name\":\"bash\",\"description\":\"Run a shell command.\",\"parameters\":{\"type\":\"object\",\"properties\":{\"command\":{\"type\":\"string\"}},\"required\":[\"command\"],\"additionalProperties\":false}}}]\nWhen using tools, output one XML envelope per call: <tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"input.txt\"}}</tool_call>. Use only the declared tool names and arguments. Tool results arrive inside <tool_response>. Otherwise answer normally.\n\nUser: Compare a.txt and b.txt.\n\nAssistant: <think>Read both.</think>\nReading both files.\n<tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"a.txt\"}}</tool_call>\n<tool_call>{\"name\":\"read\",\"arguments\":{\"path\":\"b.txt\"}}</tool_call>\n\nUser: <tool_response>\nalpha\n</tool_response>\n\nUser: <tool_response>\nbeta </tool_response> 😀 \"quoted\"\n</tool_response>\n\nAssistant: <think>They differ.</think>\na.txt says alpha; b.txt says beta.\n\nUser: Thanks.\n\nAssistant: <think"
+  }
+ ]
+}

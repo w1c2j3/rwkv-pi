@@ -152,3 +152,10 @@
 !/rwkvdata/tests/__init__.py
 !/rwkvdata/tests/test_faults.py
 !/rwkvdata/tests/test_rwkvdata.py
+!/conformance/
+!/conformance/rwkv-pi-xml-continuation-v3/
+!/scripts/conformance.mjs
+!/test/conformance.test.mjs
+!/conformance/rwkv-pi-xml-continuation-v3/render.json
+!/conformance/rwkv-pi-xml-continuation-v3/parse.json
+!/conformance/rwkv-pi-xml-continuation-v3/tokens.json

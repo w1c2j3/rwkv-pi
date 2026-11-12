@@ -31,6 +31,7 @@
     "start": "node dist/cli.js",
     "start:source": "node scripts/run-pi-source.mjs dist/cli.js",
     "doctor": "node dist/doctor.js",
+    "conformance": "node scripts/conformance.mjs",
     "setup": "bash scripts/install.sh",
     "orchestrate": "node dist/orchestrate-cli.js",
     "step": "node dist/step-cli.js",

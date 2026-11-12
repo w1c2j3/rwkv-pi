@@ -99,3 +99,20 @@ Teacher runs use pi's tools unchanged.
 - Packing (`pipeline/compile-lightning-dataset.mjs`) uses the same renderer and the native tokenizer. Context
   segments are not supervised. Complete assistant targets, including EOS token 0, follow the
   `segment-end-target-v1` contract, and the packer checks token prefixes and segment concatenation.
+
+## Standard and conformance
+
+`rwkv-pi-xml-continuation-v3` is the standard RWKV agent wire for every harness integration (Pi now, a DSH plugin
+later). Token counts and training rows use only the Lightning-native tokenizer pinned in `lightning-source.lock.json`.
+Another implementation is conformant when it reproduces, byte for byte, the fixtures in
+`conformance/rwkv-pi-xml-continuation-v3/`:
+
+| File | Contract |
+| --- | --- |
+| `render.json` | Chat request (messages, tools, `chat_template_kwargs`) → exact prompt text, including the generation prefix |
+| `parse.json` | Raw engine continuation → reasoning, visible text, tool calls and finish reason, or `rejected` (strict mode, no recovery) |
+| `tokens.json` | Prompt → Lightning-native token ids, with the engine revision and vocabulary hash |
+
+`npm run conformance` checks the fixtures against the current build, and `npm test` runs the same check. A change to
+any fixture is a protocol change: bump the version string in `src/prompt.ts`, regenerate with
+`npm run conformance -- --write`, and keep the old directory for data packed under the previous version.
