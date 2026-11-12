@@ -110,7 +110,7 @@ test("real pi harness executes client-parsed XML and replays observations in raw
 
 test("native pi JSON executes through the real harness and matches canonical replay",async t=>{
   const {config,requests}=await endpoint(t,[{text:nativeJson+'\n\nUser:',matchedStop:'\nUser:'},{text:'Read successfully.<EOD>',matchedStop:'<EOD>'}]);
-  const outputDir=await mkdtemp('/mnt/f/rwkv-pi-data/tmp/native-json-test-');t.after(()=>rm(outputDir,{recursive:true,force:true}));
+  const outputDir=await mkdtemp(join(tmpdir(),'native-json-test-'));t.after(()=>rm(outputDir,{recursive:true,force:true}));
   const jsonConfig={...config,toolFormat:'json',promptTemplate:'json'};
   const {record}=await runTask({schemaVersion:1,id:'json-fixture',family:'json-fixture',split:'smoke',source:'mock protocol test; not model evaluation',prompt:'Read input.txt.',tools:['read'],files:{'input.txt':'NATIVE_JSON_OBSERVATION\n'},checks:[{type:'file_equals',path:'input.txt',expected:'NATIVE_JSON_OBSERVATION\n'}]},
     {provider:createRwkvProvider(jsonConfig),role:'smoke',outputDir,maxRequests:2,timeoutMs:15000,sandbox:'bubblewrap',thinkingLevel:'off'});
