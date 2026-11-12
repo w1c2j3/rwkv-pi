@@ -27,7 +27,7 @@ test('Step CLI sends the native seven-tool prompt and appends Chinese instructio
  `);
  const capture=join(root,'request.json');
  const env={...process.env,STEP_API_KEY:'fixture-no-network',STEP_MODEL:'step-3.5-flash',STEP_BILLING:'api',STEP_REASONING_EFFORT:'',
-  PI_CODING_AGENT_DIR:join(root,'agent'),RWKV_PI_SOURCE:resolve('.upstream/pi-next'),STEP_FIXTURE_CAPTURE:capture,
+  PI_CODING_AGENT_DIR:join(root,'agent'),RWKV_PI_SOURCE:resolve('.upstream/pi'),STEP_FIXTURE_CAPTURE:capture,
   NODE_OPTIONS:`--import=${pathToFileURL(preload).href}`};
  const execution=run(process.execPath,[resolve('dist/step-cli.js'),'--offline','--no-approve','--no-session','--no-themes','--print','请确认中文接入。'],{cwd:ws,env,timeout:50000});
  execution.child.stdin.end();

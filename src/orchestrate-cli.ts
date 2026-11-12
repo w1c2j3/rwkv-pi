@@ -39,8 +39,8 @@ try {
     console.error(`rwkv-pi-orchestrate: ${teacher.modelId} reports context ${probed}; using it instead of ${teacher.contextWindow}.`);
   } else if (!probed) console.error(`rwkv-pi-orchestrate: ${teacher.modelId} context not reported; using TEACHER_CONTEXT_WINDOW=${teacher.contextWindow}, TEACHER_MAX_TOKENS=${teacher.maxTokens}.`);
   console.error(`rwkv-pi-orchestrate: main=${teacher.modelId}; subagents=${readConfig().modelId}; concurrency limit=${subagentLimits().concurrency}.`);
-  // The seven-tool pi used for RWKV training (grep/find spawn hooks) is the pi-next source checkout.
-  const piNext = fileURLToPath(new URL("../.upstream/pi-next", import.meta.url));
+  // The seven-tool pi used for RWKV training (grep/find spawn hooks) is the patched pi source checkout (npm run pi:setup).
+  const piNext = fileURLToPath(new URL("../.upstream/pi", import.meta.url));
   if (!process.env.RWKV_PI_SOURCE && existsSync(join(piNext, "packages/coding-agent/src/cli.ts"))) process.env.RWKV_PI_SOURCE = piNext;
   const source = process.env.RWKV_PI_SOURCE ? resolve(process.env.RWKV_PI_SOURCE) : undefined;
   const piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));

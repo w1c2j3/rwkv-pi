@@ -21,9 +21,9 @@ jobs:
       - run: python -B -m unittest discover -s rwkvdata/tests -t . -v
       - run: npm ci
       - run: npm run check
+      # Several suites drive real Pi subprocesses from the patched source checkout.
+      - run: npm run pi:setup
       - run: npm test
       - run: node --test data_pipeline/test_delegation.mjs
-      - run: npm run pi:setup
-        if: matrix.node == 22
       - run: npm run test:source
         if: matrix.node == 22

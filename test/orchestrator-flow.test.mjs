@@ -50,7 +50,7 @@ test('native planning loop delegates to RWKV, requires diff review, applies outp
   const env = { ...process.env };
   for (const k of Object.keys(env)) if (k.startsWith('TEACHER_') || k.startsWith('RWKV_')) delete env[k];
   const url = `http://127.0.0.1:${server.address().port}/v1`;
-  Object.assign(env, { RWKV_PI_SOURCE: resolve('.upstream/pi-next'), RWKV_PI_DATA_ROOT: data,
+  Object.assign(env, { RWKV_PI_SOURCE: resolve('.upstream/pi'), RWKV_PI_DATA_ROOT: data,
     RWKV_BACKEND: 'lightning', RWKV_BASE_URL: url, RWKV_MODEL: 'fixture-student', RWKV_API_KEY: 'fixture',
     RWKV_CONTEXT_WINDOW: '32768', RWKV_MAX_TOKENS: '4096', RWKV_SUBAGENT_SANDBOX: 'none',
     RWKV_SUBAGENT_MAX_REQUESTS: '2', RWKV_SUBAGENT_TIMEOUT_SECONDS: '30',
@@ -116,7 +116,7 @@ test('opt-in subagents run a real RWKV main loop and RWKV child without teacher 
   t.after(() => new Promise(r => { server.close(r); server.closeAllConnections(); }));
   const env = { ...process.env };
   for (const k of Object.keys(env)) if (k.startsWith('TEACHER_') || k.startsWith('RWKV_')) delete env[k];
-  Object.assign(env, { RWKV_PI_SOURCE: resolve('.upstream/pi-next'), RWKV_PI_DATA_ROOT: data,
+  Object.assign(env, { RWKV_PI_SOURCE: resolve('.upstream/pi'), RWKV_PI_DATA_ROOT: data,
     RWKV_BACKEND: 'lightning', RWKV_BASE_URL: `http://127.0.0.1:${server.address().port}/v1`, RWKV_MODEL: 'fixture-rwkv', RWKV_API_KEY: 'fixture',
     RWKV_CONTEXT_WINDOW: '32768', RWKV_MAX_TOKENS: '4096', RWKV_SUBAGENT_SANDBOX: 'none',
     RWKV_SUBAGENT_MAX_REQUESTS: '2', RWKV_SUBAGENT_TIMEOUT_SECONDS: '30',

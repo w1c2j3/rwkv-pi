@@ -1,4 +1,4 @@
-// RWKV subagent manager: real pi subprocesses (pi-next source) against a mock Lightning endpoint.
+// RWKV subagent manager: real pi subprocesses (patched pi source) against a mock Lightning endpoint.
 // Protocol fixture only; says nothing about model quality.
 import assert from "node:assert/strict";
 import test from "node:test";
@@ -42,7 +42,7 @@ test("parallel read and write subagents, budget stop, copy-only changes and conf
   await mkdir(ws); await mkdir(data);
   await writeFile(join(ws, "input.txt"), "HELLO\n");
   Object.assign(process.env, { RWKV_BASE_URL: url, RWKV_MODEL: "mock", RWKV_CONTEXT_WINDOW: "32768", RWKV_MAX_TOKENS: "4096",
-    RWKV_PI_SOURCE: resolve(".upstream/pi-next"), RWKV_TOOL_CALL_RECOVERY: "1" });
+    RWKV_PI_SOURCE: resolve(".upstream/pi"), RWKV_TOOL_CALL_RECOVERY: "1" });
   const m = new SubagentManager(ws, { concurrency: 4, maxRequests: 6, timeoutSeconds: 180, maxTasks: 8, sandbox: "none", mount: "" }, data);
   m.start([
     { name: "reader", task: "读取 input.txt 并告诉我内容。" },

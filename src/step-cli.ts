@@ -11,7 +11,7 @@ try {
   const projectEnv = fileURLToPath(new URL("../.env", import.meta.url));
   for (const file of [resolve(".env"), projectEnv]) if (existsSync(file)) loadEnvFile(file);
   const config = readStepConfig();
-  const piNext = fileURLToPath(new URL("../.upstream/pi-next", import.meta.url));
+  const piNext = fileURLToPath(new URL("../.upstream/pi", import.meta.url));
   const source = process.env.RWKV_PI_SOURCE ? resolve(process.env.RWKV_PI_SOURCE)
     : existsSync(join(piNext, "packages/coding-agent/src/cli.ts")) ? piNext : undefined;
   const entry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
