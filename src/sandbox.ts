@@ -2,7 +2,7 @@ import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
-import { basename, delimiter, join, resolve } from "node:path";
+import { basename, delimiter, join, posix, resolve } from "node:path";
 import type { Readable } from "node:stream";
 import {
   createBashToolDefinition, createEditToolDefinition, createFindToolDefinition, createGrepToolDefinition,
@@ -49,9 +49,16 @@ export class WorkspaceSandbox {
   private readonly prefix: string[];
   private readonly searchBinaries = new Set<string>();
   private readonly statCache = new Map<string, boolean>();
-  constructor(hostCwd: string, private readonly environment?: TaskEnvironment) {
+  constructor(hostCwd: string, private readonly environment?: TaskEnvironment, workspaceMount = WORKSPACE_MOUNT) {
+    // A caller can test an unseen path without aliases for paths remembered from training.
+    // Keep custom mounts away from the system directories needed by native tools.
+    if (workspaceMount !== WORKSPACE_MOUNT && (!workspaceMount.startsWith("/srv/") ||
+        posix.normalize(workspaceMount) !== workspaceMount || workspaceMount.includes("\0"))) {
+      throw new Error("Custom workspace mount must be a normalized absolute path under /srv/.");
+    }
+    if (environment && workspaceMount !== WORKSPACE_MOUNT) throw new Error("Container tasks use their image's workdir.");
     this.kind = environment ? "docker" : "bubblewrap";
-    this.cwd = environment ? environment.workdir : WORKSPACE_MOUNT;
+    this.cwd = environment ? environment.workdir : workspaceMount;
     if (environment) { this.prefix = this.dockerPrefix(hostCwd, environment); return; }
     this.prefix = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL"];
     // /etc/alternatives holds the targets of Debian alternatives links such as awk, cc and java;
@@ -70,7 +77,7 @@ export class WorkspaceSandbox {
       if (binary) { this.prefix.push("--ro-bind", binary, `/opt/rwkv-pi/bin/${name}`); this.searchBinaries.add(name); }
     }
     this.prefix.push(
-      "--bind", resolve(hostCwd), WORKSPACE_MOUNT, "--chdir", WORKSPACE_MOUNT, "--clearenv",
+      "--bind", resolve(hostCwd), this.cwd, "--chdir", this.cwd, "--clearenv",
       "--setenv", "HOME", "/home/sandbox", "--setenv", "PATH", "/opt/rwkv-pi/bin:/usr/local/bin:/usr/bin:/bin",
       "--setenv", "LANG", "C.UTF-8", "--",
     );

@@ -15,12 +15,13 @@ try {
     tasks: { type: "string" }, out: { type: "string" }, backend: { type: "string", default: "rwkv" },
     "max-requests": { type: "string", default: "32" }, "timeout-ms": { type: "string", default: "300000" },
     sandbox: { type: "string", default: "bubblewrap" },
+    "workspace-mount": { type: "string" },
     deployment: { type: "string" },
     thinking: { type: "string", default: "high" },
     help: { type: "boolean" },
   } });
   if (values.help) {
-    console.log("Usage: npm run harness -- --tasks tasks.jsonl --out runs/batch --backend rwkv|teacher [--max-requests 32 --timeout-ms 300000 --thinking high|off]");
+    console.log("Usage: npm run harness -- --tasks tasks.jsonl --out runs/batch --backend rwkv|teacher [--max-requests 32 --timeout-ms 300000 --thinking high|off --workspace-mount /srv/run-id/project]");
   } else {
     if (!values.tasks || !values.out) throw new Error("--tasks and --out are required.");
     if (values.backend !== "rwkv" && values.backend !== "teacher") throw new Error("--backend must be rwkv or teacher.");
@@ -49,6 +50,7 @@ try {
         provider, role: task.split === "smoke" ? "smoke" : values.backend === "teacher" ? "teacher" : "student",
         outputDir: values.out, maxRequests, timeoutMs,
         sandbox: values.sandbox,
+        workspaceMount: values["workspace-mount"],
         inference,
         contextBudget: rwkvConfig,
         thinkingLevel: values.thinking,

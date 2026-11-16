@@ -8,16 +8,22 @@
 // the copy was made. Traces are kept under <RWKV_PI_DATA_ROOT>/runs/subagents/.
 import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createHash } from "node:crypto";
-import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
+import { copyFileSync, cpSync, existsSync, lstatSync, mkdirSync, readdirSync, readFileSync, realpathSync, rmSync, statSync, unlinkSync, writeFileSync, appendFileSync } from "node:fs";
 import { homedir } from "node:os";
-import { dirname, join, relative, resolve } from "node:path";
+import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dataRoot, envInteger, readConfig } from "./config.js";
 import { countMessage, emptyCounters, type WorkCounters } from "./project-participation.js";
 
 export const SUBAGENT_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
 
-export interface SubagentLimits { concurrency: number; maxRequests: number; timeoutSeconds: number; maxTasks: number; sandbox: "bwrap" | "none"; mount: string }
+export interface SubagentLimits {
+  concurrency: number; maxRequests: number; timeoutSeconds: number; maxTasks: number; sandbox: "bwrap" | "none"; mount: string;
+  /** Opt-in isolated runtime: mount only these public runtime paths and the task's workspace. */
+  runtimePaths?: readonly string[];
+  /** Disable host-to-sandbox task-text translation when evaluating path discovery itself. */
+  translateTaskPaths?: boolean;
+}
 export function subagentLimits(env: NodeJS.ProcessEnv = process.env): SubagentLimits {
   const sandbox = env.RWKV_SUBAGENT_SANDBOX?.trim() || "bwrap";
   if (sandbox !== "bwrap" && sandbox !== "none") throw new Error("RWKV_SUBAGENT_SANDBOX must be bwrap or none.");
@@ -120,6 +126,9 @@ export class SubagentManager {
 
   constructor(readonly cwd: string, readonly limits: SubagentLimits = subagentLimits(), root = subagentRoot(), private readonly onChange?: (agent: Subagent) => void) {
     this.inner = limits.sandbox === "bwrap" && limits.mount ? limits.mount : cwd;
+    for (const path of limits.runtimePaths ?? []) {
+      if (!isAbsolute(path) || !existsSync(path) || realpathSync(path) === "/") throw new Error(`Invalid isolated runtime path: ${path}`);
+    }
     if (this.inner !== cwd && !(this.inner.startsWith("/srv/") || this.inner.startsWith("/tmp/"))) throw new Error("RWKV_SUBAGENT_MOUNT must be under /srv or /tmp (the sandbox mounts a tmpfs there).");
     this.session = new Date().toISOString().replace(/[:.]/g, "-") + "-" + process.pid;
     this.root = join(root, this.session);
@@ -180,7 +189,8 @@ export class SubagentManager {
       mount = ["--bind", fork, this.inner];
     }
     // Paths the main agent wrote in terms of the real workspace refer to the mount inside the sandbox.
-    const task = this.inner === this.cwd ? agent.task : agent.task.split(this.cwd).join(this.inner);
+    const task = this.inner === this.cwd || this.limits.translateTaskPaths === false
+      ? agent.task : agent.task.split(this.cwd).join(this.inner);
     const { command, args } = piCommand(task);
     const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
     for (const key of Object.keys(env)) if (key.startsWith("TEACHER_") || key.startsWith("DEEPSEEK_") || key.startsWith("STEP_")) delete env[key];
@@ -188,8 +198,13 @@ export class SubagentManager {
     const mainKey = process.env.TEACHER_API_KEY_FILE;
     const hiddenKeys = mainKey && existsSync(mainKey) ? ["--ro-bind", "/dev/null", resolve(mainKey)] : [];
     const sandboxed = this.limits.sandbox === "bwrap";
+    const rootMounts = this.limits.runtimePaths
+      ? ["--tmpfs", "/", ...["/usr", "/bin", "/lib", "/lib64", "/etc", ...this.limits.runtimePaths]
+        .filter((path, index, paths) => paths.indexOf(path) === index && existsSync(path))
+        .flatMap((path) => ["--ro-bind", resolve(path), resolve(path)])]
+      : ["--ro-bind", "/", "/"];
     const argv = sandboxed
-      ? ["--ro-bind", "/", "/", "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
+      ? [...rootMounts, "--dev", "/dev", "--proc", "/proc", "--tmpfs", "/tmp",
         ...(this.inner.startsWith("/srv/") ? ["--tmpfs", "/srv"] : []), ...mount, ...hiddenKeys, "--bind", agentDir, agentDir,
         "--unshare-pid", "--die-with-parent", "--chdir", this.inner, "--", command, ...args]
       : args;

@@ -17,6 +17,7 @@ import { parseArgs } from "node:util";
 import { readConfig, requireDataRoot, type RwkvConfig } from "./config.js";
 import { countPrompt } from "./lightning.js";
 import { sha256 } from "./provenance.js";
+import { applyProfile, configuredByEnv, readProfile } from "./profile.js";
 
 export type Status = "ok" | "warn" | "fail";
 export interface Check { name: string; status: Status; detail: string }
@@ -134,6 +135,8 @@ export async function runDoctor(options: { env?: NodeJS.ProcessEnv; offline?: bo
 async function main() {
   const { values } = parseArgs({ options: { offline: { type: "boolean", default: false }, json: { type: "boolean", default: false } } });
   if (existsSync(".env")) loadEnvFile(".env");
+  const profile = configuredByEnv() ? undefined : readProfile();
+  if (profile) applyProfile(profile);
   const checks = await runDoctor({ offline: values.offline });
   if (values.json) console.log(JSON.stringify(checks, null, 2));
   else for (const check of checks) console.log(`${{ ok: "  ok ", warn: " warn", fail: " FAIL" }[check.status]}  ${check.name.padEnd(17)} ${check.detail}`);

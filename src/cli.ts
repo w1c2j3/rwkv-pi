@@ -10,12 +10,22 @@ import { readTeacherConfig } from "./teacher.js";
 import { stallLimits } from "./stall-detector.js";
 import { collaborationDataRoot } from "./collab-trace.js";
 import { resolvePlugins } from "./plugins.js";
+import { ACCOUNT_COMMANDS, login, runAccountCommand } from "./login.js";
+import { applyProfile, configuredByEnv, readProfile } from "./profile.js";
 
-try {
-  // Preserve the user's cwd, while supporting launches outside this checkout.
-  for (const file of [resolve(".env"), fileURLToPath(new URL("../.env", import.meta.url))]) {
-    if (existsSync(file)) loadEnvFile(file);
-  }
+// Preserve the user's cwd, while supporting launches outside this checkout.
+for (const file of [resolve(".env"), fileURLToPath(new URL("../.env", import.meta.url))]) {
+  if (existsSync(file)) loadEnvFile(file);
+}
+const [command, ...commandArgs] = process.argv.slice(2);
+if ((ACCOUNT_COMMANDS as readonly string[]).includes(command ?? "")) {
+  await runAccountCommand(command!, commandArgs).catch((error: Error) => {
+    console.error(`rwkv-pi: ${error.message}`);
+    process.exitCode = 1;
+  });
+} else try {
+  // Without an engine in the environment, use the saved connection; a first launch asks for a token.
+  if (!configuredByEnv()) applyProfile(readProfile() ?? await login());
   const config = readConfig();
   const source = process.env.RWKV_PI_SOURCE ? resolve(process.env.RWKV_PI_SOURCE) : undefined;
   const piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));

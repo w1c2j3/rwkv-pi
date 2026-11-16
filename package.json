@@ -43,7 +43,7 @@
     "tokenize": "node pipeline/compile-lightning-dataset.mjs",
     "smoke": "node scripts/smoke-harness.mjs",
     "smoke:source": "node scripts/run-pi-source.mjs scripts/smoke-harness.mjs",
-    "test:source": "node scripts/run-pi-source.mjs --test test/integration.test.mjs test/harness.test.mjs test/sandbox.test.mjs test/sandbox-search.test.mjs test/tool-adapter.test.mjs test/token-budget.test.mjs test/loop-guard.test.mjs test/lightning.test.mjs test/stall-detector.test.mjs test/auto-collab.test.mjs test/collaboration.test.mjs test/recovery.test.mjs test/subagents.test.mjs test/orchestrator-extension.test.mjs test/orchestrator-flow.test.mjs test/project-participation.test.mjs test/deepseek-teacher.test.mjs test/step-teacher.test.mjs test/step-teacher-cli.test.mjs",
+    "test:source": "node scripts/run-pi-source.mjs --test test/integration.test.mjs test/harness.test.mjs test/sandbox.test.mjs test/sandbox-search.test.mjs test/sandbox-mount.test.mjs test/tool-adapter.test.mjs test/token-budget.test.mjs test/loop-guard.test.mjs test/lightning.test.mjs test/stall-detector.test.mjs test/auto-collab.test.mjs test/collaboration.test.mjs test/recovery.test.mjs test/subagents.test.mjs test/subagent-isolation.test.mjs test/orchestrator-extension.test.mjs test/orchestrator-flow.test.mjs test/project-participation.test.mjs test/deepseek-teacher.test.mjs test/step-teacher.test.mjs test/step-teacher-cli.test.mjs",
     "check": "tsc -p tsconfig.json --noEmit",
     "test": "npm run build && node --test test/*.test.mjs",
     "prepare": "npm run build",

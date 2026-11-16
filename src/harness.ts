@@ -36,6 +36,7 @@ export interface RunRecord {
   model: { provider: string; id: string };
   provenance: ReturnType<typeof runtimeProvenance>;
   isolation: "bubblewrap" | "docker" | "none";
+  workspacePath?: string;
   responseAdapter: "none" | "rwkv-json-v1" | "rwkv-xml-v1" | "rwkv-xml-continuation-v2" | "rwkv-json-continuation-v1";
   promptVersion?: string;
   loopGuard?: { repeatFailureLimit: number; identicalCallLimit?: number; targetFailureLimit?: number };
@@ -60,6 +61,8 @@ export interface HarnessOptions {
   maxRequests: number;
   timeoutMs: number;
   sandbox?: "bubblewrap" | "none";
+  /** Optional unseen mount for path-generalization tests; no path aliases are created. */
+  workspaceMount?: string;
   inference?: RunRecord["inference"];
   contextBudget?: RwkvConfig;
   thinkingLevel?: "high" | "off";
@@ -77,7 +80,10 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
   const cwd = join(directory, "workspace");
   await mkdir(cwd, { recursive: true });
   if (task.environment && options.sandbox === "none") throw new Error("Environment tasks always run in their container.");
-  const sandbox = options.sandbox === "none" ? undefined : new WorkspaceSandbox(cwd, task.environment);
+  if (options.workspaceMount && (options.sandbox === "none" || task.environment)) {
+    throw new Error("A custom workspace mount requires the bubblewrap sandbox without a container environment.");
+  }
+  const sandbox = options.sandbox === "none" ? undefined : new WorkspaceSandbox(cwd, task.environment, options.workspaceMount);
   // The agent and the checks see the workspace at the sandbox's path (the image workdir for containers).
   const agentCwd = sandbox?.cwd ?? cwd;
   await sandbox?.probe();
@@ -98,6 +104,7 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
     schemaVersion: 1, runId, task, taskSha256: digest(definition), role: options.role,
     model: { provider: model.provider, id: model.id }, provenance: runtimeProvenance(),
     isolation: sandbox?.kind ?? "none",
+    workspacePath: agentCwd,
     responseAdapter: rwkv.rwkvPiToolFormat === "json" ? "rwkv-json-continuation-v1" : rwkv.rwkvPiToolFormat === "xml" ? "rwkv-xml-continuation-v2" : "none",
     ...(rwkv.rwkvPiToolFormat === "xml" || rwkv.rwkvPiToolFormat === "json" ? { promptVersion: promptVersion(rwkv.rwkvPiToolFormat) } : {}),
     ...(rwkv.rwkvPiRepeatFailureLimit !== undefined

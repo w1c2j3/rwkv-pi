@@ -112,11 +112,13 @@
 !/test/project-participation.test.mjs
 !/test/recovery.test.mjs
 !/test/sandbox-search.test.mjs
+!/test/sandbox-mount.test.mjs
 !/test/sandbox.test.mjs
 !/test/stall-detector.test.mjs
 !/test/step-teacher-cli.test.mjs
 !/test/step-teacher.test.mjs
 !/test/subagents.test.mjs
+!/test/subagent-isolation.test.mjs
 !/test/test_irwkv_xml_parser.py
 !/test/test_xml_protocol.py
 !/test/token-budget.test.mjs
