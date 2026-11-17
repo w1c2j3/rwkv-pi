@@ -7,7 +7,7 @@ import { createEditToolDefinition, createLsToolDefinition, createReadToolDefinit
 import { runTask } from "../dist/harness.js";
 import { repeatedTargetFailure, TARGET_GUARD_PREFIX } from "../dist/loop-guard.js";
 import { createRwkvProvider, readConfig } from "../dist/provider.js";
-import { collapseRepeats, findRegion, hostFs, overwriteSummary, reindent, withTolerance } from "../dist/tolerant-tools.js";
+import { collapseRepeats, findRegion, hostFs, introducedEditSyntaxError, overwriteSummary, reindent, withTolerance } from "../dist/tolerant-tools.js";
 import { mockServer, toolCall } from "./helpers/mock-server.mjs";
 
 async function workspace(t, files) {
@@ -210,4 +210,47 @@ test("tolerance changes tool results only: the model-visible request is byte-ide
   assert.equal(records["1"].loopGuard.targetFailureLimit, 3);
   const observation = records["1"].messages.find((message) => message.role === "toolResult");
   assert.match(observation.content[0].text, /re-indented the replacement/);
+});
+
+test("similarRegion refuses omitted-middle sliding windows on repetitive blocks and points to the full span", async (t) => {
+  const bodyLines = Array.from({ length: 40 }, (_, i) => `  step_${i + 1}(ctx, ${i});`);
+  const original = ["export function runPipeline(ctx: Record<string, unknown>) {", ...bodyLines, "  return ctx;", "}", ""].join("\n");
+  const cwd = await workspace(t, { "pipeline.ts": original });
+  const driftedOld = [...bodyLines.slice(0, 14), ...bodyLines.slice(24), "  return ctx;"].join("\n");
+  await assert.rejects(
+    edit(cwd, "pipeline.ts", driftedOld, "  return executeFastPipeline(ctx);"),
+    /Could not find the edit in pipeline\.ts\.[^\n]*closest text is lines 2-42/,
+  );
+  assert.equal(await readFile(join(cwd, "pipeline.ts"), "utf8"), original);
+});
+
+test("syntax guard blocks newly introduced TS, Python, and JSON syntax errors without blocking already-broken files", async (t) => {
+  const origTs = "export function isPositive(n: number): boolean {\n  return Number.isFinite(n) && n > 0;\n}\n";
+  const origPy = "def allow(role):\n    return role == 'admin'\n";
+  const origJson = '{\n  "ttl": 3600\n}\n';
+  const brokenPy = "def broken(:\n    return 1\n";
+  const cwd = await workspace(t, { "v.ts": origTs, "g.py": origPy, "c.json": origJson, "broken.py": brokenPy });
+
+  await assert.rejects(
+    edit(cwd, "v.ts", "  return Number.isFinite(n) && n > 0;", "  return Number.isFinite(n && n >= 1;"),
+    /introduces a syntax error \(SyntaxError:/,
+  );
+  assert.equal(await readFile(join(cwd, "v.ts"), "utf8"), origTs);
+
+  await assert.rejects(
+    edit(cwd, "g.py", "    return role == 'admin'", "    return (role =="),
+    /introduces a syntax error \(SyntaxError:/,
+  );
+  assert.equal(await readFile(join(cwd, "g.py"), "utf8"), origPy);
+
+  await assert.rejects(
+    edit(cwd, "c.json", '"ttl": 3600', '"ttl": 3600,'),
+    /introduces a syntax error \(JSON SyntaxError:/,
+  );
+  assert.equal(await readFile(join(cwd, "c.json"), "utf8"), origJson);
+
+  // Already-broken files must remain editable so the agent can repair them step by step.
+  assert.equal(await introducedEditSyntaxError(brokenPy, "def broken(:\n    return 2\n", "broken.py"), undefined);
+  await edit(cwd, "broken.py", "return 1", "return 2");
+  assert.equal(await readFile(join(cwd, "broken.py"), "utf8"), "def broken(:\n    return 2\n");
 });

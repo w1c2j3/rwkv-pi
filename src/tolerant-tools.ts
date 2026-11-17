@@ -17,7 +17,9 @@
  *
  * Every tolerated repair is stated in the tool result. Successful exact calls are untouched.
  */
+import { spawn } from "node:child_process";
 import { readdir, readFile, stat } from "node:fs/promises";
+import * as nodeModule from "node:module";
 import { posix } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
@@ -284,7 +286,7 @@ export function findRegion(content: string, oldText: string): RegionResult {
   return similarRegion(file, old);
 }
 
-/** A unique run of non-blank lines whose average per-line similarity is at least 0.9. */
+/** A unique run of non-blank lines whose average per-line similarity is at least 0.9, anchored at both ends. */
 function similarRegion(file: Lines, old: string[]): RegionResult {
   const oldLines = old.filter((line) => !isBlank(line));
   const pool = file.text.map((_, i) => i).filter((i) => !isBlank(file.text[i]!));
@@ -304,9 +306,33 @@ function similarRegion(file: Lines, old: string[]): RegionResult {
   const best = scored[0];
   if (!best) return { kind: "none" };
   const runner = scored.find((entry) => Math.abs(entry.p - best.p) >= n);
-  const first = pool[best.p]!, last = pool[best.p + n - 1]!;
+  let first = pool[best.p]!, last = pool[best.p + n - 1]!;
+  // Detect omitted-middle sliding window: if oldText's first line matches strictly better earlier (or last line later)
+  // while the opposite end anchors `best`, lines in the middle of the block were dropped.
+  let splitAnchor = false;
+  if (firstScores[best.p]! < 1) {
+    for (let q = Math.max(0, best.p - n); q < best.p; q++) {
+      if (firstScores[q]! >= 0.95 && firstScores[q]! > firstScores[best.p]! + 0.03) {
+        first = pool[q]!;
+        splitAnchor = true;
+        break;
+      }
+    }
+  }
+  if (lastScores[best.p + n - 1]! < 1) {
+    for (let r = Math.min(pool.length - 1, best.p + 2 * n - 1); r > best.p + n - 1; r--) {
+      if (lastScores[r]! >= 0.95 && lastScores[r]! > lastScores[best.p + n - 1]! + 0.03) {
+        last = pool[r]!;
+        splitAnchor = true;
+        break;
+      }
+    }
+  }
+  const anchorsOk = !splitAnchor && firstScores[best.p]! >= 0.88 && lastScores[best.p + n - 1]! >= 0.88;
   const closest = { firstLine: first + 1, lastLine: last + 1, similarity: best.score };
-  if (n < 2 || best.score < 0.9 || (runner && runner.score > best.score - 0.1)) return { kind: "none", ...(best.score >= 0.5 ? { closest } : {}) };
+  if (n < 2 || best.score < 0.9 || !anchorsOk || (runner && runner.score > best.score - 0.1)) {
+    return { kind: "none", ...(best.score >= 0.5 ? { closest } : {}) };
+  }
   return { kind: "match", match: { level: "similar", start: file.starts[first]!, end: file.starts[last]! + file.text[last]!.length,
     firstLine: first + 1, lastLine: last + 1, pairs: oldLines.map((line, t) => [line, file.text[pool[best.p + t]!]!] as const),
     gaps: blankGaps(file, pool.slice(best.p, best.p + n)), similarity: best.score } };
@@ -518,12 +544,85 @@ function tolerantLs(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execute
   };
 }
 
+const SYNTAX_CHECK_EXTS = new Set([".json", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py"]);
+const stripTsTypes = (nodeModule as { stripTypeScriptTypes?: (code: string, options?: { mode?: string }) => string }).stripTypeScriptTypes;
+const PY_AST_CHECK = "import ast,sys\ntry:\n ast.parse(sys.stdin.read(),sys.argv[1])\nexcept SyntaxError as e:\n print(f'{type(e).__name__}: {e.msg} (line {e.lineno})');sys.exit(1)\n";
+
+function pythonSyntaxCheck(text: string, path: string): Promise<string | undefined> {
+  return new Promise((resolve) => {
+    let out = "", settled = false;
+    const finish = (v: string | undefined) => { if (!settled) { settled = true; resolve(v); } };
+    let child;
+    try {
+      child = spawn("python3", ["-I", "-c", PY_AST_CHECK, path], {
+        stdio: ["pipe", "pipe", "pipe"], timeout: 5_000, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", LANG: "C" },
+      });
+    } catch { finish(undefined); return; }
+    child.stdout.on("data", (c) => { out += String(c); });
+    child.stderr.on("data", (c) => { out += String(c); });
+    child.on("error", () => finish(undefined));
+    child.on("close", (code, sig) => finish(sig !== null ? undefined : code === 0 ? "" : out.trim().split("\n")[0] || `exit ${code}`));
+    child.stdin.on("error", () => {});
+    child.stdin.end(text);
+  });
+}
+
+async function checkFileSyntax(text: string, path: string): Promise<string | undefined> {
+  const ext = posix.extname(path).toLowerCase();
+  if (!SYNTAX_CHECK_EXTS.has(ext)) return undefined;
+  if (ext === ".json") {
+    if (text.trim() === "") return "";
+    try { JSON.parse(text); return ""; }
+    catch (error) { return `JSON SyntaxError: ${messageOf(error).split("\n")[0]}`; }
+  }
+  if (ext === ".py") return pythonSyntaxCheck(text, path);
+  if (!stripTsTypes) return undefined;
+  try { stripTsTypes(text, { mode: "strip" }); return ""; }
+  catch (error) { return `SyntaxError: ${messageOf(error).split("\n")[0]}`; }
+}
+
+/** Non-empty error message only when `before` parsed cleanly and `after` introduces a syntax error. */
+export async function introducedEditSyntaxError(before: string, after: string, path: string): Promise<string | undefined> {
+  const ext = posix.extname(path).toLowerCase();
+  if (!SYNTAX_CHECK_EXTS.has(ext)) return undefined;
+  const afterErr = await checkFileSyntax(after, path);
+  if (!afterErr) return undefined;
+  return (await checkFileSyntax(before, path)) === "" ? afterErr : undefined;
+}
+
+function previewExactEdits(content: string, edits: readonly EditInput[]): string | undefined {
+  let current = content;
+  for (const edit of edits) {
+    const old = toLF(edit.oldText);
+    if (!old) return undefined;
+    const at = current.indexOf(old);
+    if (at < 0 || current.indexOf(old, at + 1) >= 0) return undefined;
+    current = current.slice(0, at) + toLF(edit.newText) + current.slice(at + old.length);
+  }
+  return current;
+}
+
 function tolerantEdit(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execute {
   const matched: Execute = async (id, args, signal, onUpdate, ctx) => {
     const edits: EditInput[] | undefined = Array.isArray(args?.edits) ? args.edits : undefined;
+    const ext = typeof args?.path === "string" ? posix.extname(args.path).toLowerCase() : "";
+    let cachedContent: string | undefined;
     const read = async () => {
+      if (cachedContent !== undefined) return cachedContent;
       const raw = (await fs.readFile(resolveIn(ctx?.cwd || baseCwd, args.path))).toString("utf8");
-      return toLF(raw.startsWith("﻿") ? raw.slice(1) : raw);
+      cachedContent = toLF(raw.startsWith("﻿") ? raw.slice(1) : raw);
+      return cachedContent;
+    };
+    const guardSyntax = async (candidateEdits: readonly EditInput[] | undefined) => {
+      if (!candidateEdits?.length || !SYNTAX_CHECK_EXTS.has(ext)) return;
+      const before = await read().catch(() => undefined);
+      if (before === undefined) return;
+      const after = previewExactEdits(before, candidateEdits);
+      if (after === undefined) return;
+      const broken = await introducedEditSyntaxError(before, after, args.path);
+      if (broken !== undefined) {
+        throw new Error(`Could not apply edit in ${args.path}: it introduces a syntax error (${broken}). Fix newText and try again.`);
+      }
     };
     const notesOf = (list: ToleratedEdit[]) => list.flatMap((edit) => (edit.note ? [edit.note] : []));
     const strip = (list: ToleratedEdit[]) => list.map(({ oldText, newText }) => ({ oldText, newText }));
@@ -534,6 +633,7 @@ function tolerantEdit(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execu
       notes = notesOf(aligned);
       if (notes.length) input = { ...args, edits: strip(aligned) };
     }
+    await guardSyntax(input.edits);
     let result;
     try {
       result = await execute(id, input, signal, onUpdate, ctx);
@@ -542,7 +642,9 @@ function tolerantEdit(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execu
       const tolerated = tolerateEdits(await read(), input.edits, args.path);
       const more = notesOf(tolerated);
       if (!more.length) throw error;
-      result = await execute(id, { ...args, edits: strip(tolerated) }, signal, onUpdate, ctx);
+      const stripped = strip(tolerated);
+      await guardSyntax(stripped);
+      result = await execute(id, { ...args, edits: stripped }, signal, onUpdate, ctx);
       notes = [...notes, ...more];
     }
     return notes.length ? annotate(result, notes.join("\n"), "after") : result;

@@ -12,9 +12,19 @@
   "appendSystemPrompt": "COPY_THE_EXISTING_CHINESE_SYSTEM_CONSTRAINTS",
   "promptSuffix": "COPY_THE_EXISTING_CHINESE_QUESTION_SUFFIX",
   "protocol": "canonical XML+JSON",
+  "historyMode": "epoch",
+  "epochBudgetTokens": 16384,
+  "epochKeepRecentPairs": 3,
+  "epochMaxResultTokens": 4000,
   "adapterRevision": "two-output-v1",
   "runtimeRevision": "PINNED_NATIVE_PI_REVISION",
   "credentialFile": "/PRIVATE/teacher.key",
+  "webTools": {
+    "enabled": false,
+    "baseUrl": "https://api.deepseek.com/v1/tools",
+    "credentialFile": "/PRIVATE/deepseek-web.key",
+    "maxCalls": 32
+  },
   "budget": {
     "ledgerPath": "/PRIVATE/existing-account-budget.json",
     "ownerLock": "/PRIVATE/existing-account-owner.lock",
@@ -30,7 +40,7 @@
     "piSource": "/PRIVATE/pinned-pi-source",
     "runtime": "/PRIVATE/runtime",
     "budgetModule": "/PRIVATE/runtime/pipeline/paid-trial-budget.mjs",
-    "harnessModule": "/PRIVATE/runtime/pipeline/teacher-followup-harness.mjs",
+    "harnessModule": "/PRIVATE/runtime/dist/harness.js",
     "delegationModule": "/PRIVATE/code/data_pipeline/delegated_rollout.mjs",
     "studentConfig": "/PRIVATE/student.json",
     "workflowConcurrency": 2,

@@ -13,8 +13,8 @@ const WORKFLOW = '本次采用真实协作：你负责规划、委派、审查�
 
 export async function runDelegatedTask(input, options) {
   const load = name => import(pathToFileURL(join(options.runtime, 'dist', name + '.js')).href);
-  const [{parseTask,taskPath},{digest,runtimeProvenance},{WorkspaceSandbox},{SubagentManager},{SubagentPlan}]
-    = await Promise.all(['tasks','provenance','sandbox','subagents','subagent-plan'].map(load));
+  const [{parseTask,taskPath},{digest,runtimeProvenance},{WorkspaceSandbox},{SubagentManager},{SubagentPlan},{foldEpochRequest},{foldWorklistRequest}]
+    = await Promise.all(['tasks','provenance','sandbox','subagents','subagent-plan','epoch','worklist'].map(load));
   const task=parseTask(input);
   if(task.environment)throw Error('This collector currently accepts the reviewed Linux sandbox tasks only');
   const runId=randomUUID(), dir=resolve(options.outputDir,runId), cwd=join(dir,'workspace');
@@ -24,11 +24,16 @@ export async function runDelegatedTask(input, options) {
   }
   const model=options.provider.getModels()[0];
   if(model.provider!==options.teacherIdentity?.provider||model.id!==options.teacherIdentity?.id)throw Error('Configured teacher identity mismatch');
-  if(options.followups?.length)throw Error('Delegation collector does not yet support user follow-ups');
+  const followups=(options.followups??[]).map(f=>typeof f==='string'?f:f?.prompt);
+  if(followups.some(f=>typeof f!=='string'||!f.trim()))throw Error('Invalid follow-up prompt');
+  const effectiveHistoryMode=options.historyMode??options.provider.rwkvPiHistoryMode??'full';
+  const effectiveEpochConfig=options.epoch??options.provider.rwkvPiEpochConfig;
   const sandbox=new WorkspaceSandbox(cwd);await sandbox.probe();await sandbox.probeSearch(['read','grep','find','ls']);
+  const agentCwd=sandbox.cwd;
   const {id:_id,split:_split,...definition}=task;
   const record={schemaVersion:1,runId,task,taskSha256:digest(definition),role:'teacher',
-    model:{provider:model.provider,id:model.id},provenance:runtimeProvenance(),isolation:sandbox.kind,responseAdapter:'none',
+    model:{provider:model.provider,id:model.id},provenance:runtimeProvenance(),isolation:sandbox.kind,workspacePath:agentCwd,responseAdapter:'none',
+    ...(options.historyMode!==undefined||effectiveHistoryMode==='epoch'||effectiveHistoryMode==='worklist'?{historyMode:effectiveHistoryMode}:{}),
     startedAt:new Date().toISOString(),finishedAt:'',budget:{maxRequests:options.maxRequests,timeoutMs:options.timeoutMs},
     generation:{contextWindow:model.contextWindow,maxTokens:model.maxTokens,thinkingLevel:options.thinkingLevel},
     status:'error',checks:[],steps:[],messages:[],promptSuffix:options.promptSuffix,appendSystemPrompt:options.appendSystemPrompt,
@@ -60,23 +65,30 @@ export async function runDelegatedTask(input, options) {
     event({type:'worker_state',id:a.id,state:a.state,requests:a.requests,toolCalls:a.toolCalls});
   });
   record.workerRuntime={model:options.studentModel,endpoint:options.studentEndpoint,limits:options.childLimits,innerWorkspace:manager.inner};
-  const controlTools=delegationTools({manager,plan:new SubagentPlan(),verify,recordEvent:e=>{
+  const plan=new SubagentPlan();
+  const controlTools=delegationTools({manager,plan,verify,recordEvent:e=>{
     record.delegationEvents.push(e);event({type:'delegation',...e});checkpoint();
   }});
   const readTools=sandbox.tools(['read','grep','find','ls']);
+  const extraWebTools=options.webTools??[];
   const resourceLoader={getExtensions:()=>({extensions:[],errors:[],runtime:createExtensionRuntime()}),getSkills:()=>({skills:[],diagnostics:[]}),
     getPrompts:()=>({prompts:[],diagnostics:[]}),getThemes:()=>({themes:[],diagnostics:[]}),getAgentsFiles:()=>({agentsFiles:[]}),
     getSystemPrompt:()=>undefined,getSystemPromptSource:()=>undefined,getAppendSystemPrompt:()=>[options.appendSystemPrompt,WORKFLOW],
     getAppendSystemPromptSources:()=>[],extendResources:()=>{},reload:async()=>{}};
   const modelRuntime=await ModelRuntime.create({credentials:new InMemoryCredentialStore(),modelsStore:new InMemoryModelsStore(),modelsPath:null,refreshOnCreate:false,allowModelNetwork:false});
   modelRuntime.registerNativeProvider(options.provider);
-  const {session}=await createAgentSession({cwd,agentDir:join(dir,'agent'),modelRuntime,model,thinkingLevel:options.thinkingLevel,
+  const {session}=await createAgentSession({cwd:agentCwd,agentDir:join(dir,'agent'),modelRuntime,model,thinkingLevel:options.thinkingLevel,
     settingsManager:SettingsManager.inMemory({compaction:{enabled:false},retry:{enabled:false,provider:{maxRetries:0}},cacheWarming:'off'}),
-    resourceLoader,sessionManager:SessionManager.inMemory(cwd),tools:['read','grep','find','ls',...controlTools.map(t=>t.name)],customTools:[...readTools,...controlTools]});
+    resourceLoader,sessionManager:SessionManager.inMemory(agentCwd),tools:['read','grep','find','ls',...controlTools.map(t=>t.name),...extraWebTools.map(t=>t.name)],customTools:[...readTools,...controlTools,...extraWebTools]});
   let last,interrupted;const previous=session.agent.onPayload;
   session.agent.onPayload=async(payload,requestModel)=>{
     if(record.steps.length>=options.maxRequests){interrupted='request_budget';throw Error('Parent request budget reached');}
-    const request=structuredClone(await previous?.(payload,requestModel)??payload);
+    let request=await previous?.(payload,requestModel)??payload;
+    if(!options.provider.rwkvPiTransportFolded){
+      if(effectiveHistoryMode==='epoch')request=foldEpochRequest(request,effectiveEpochConfig).request;
+      else if(effectiveHistoryMode==='worklist')request=foldWorklistRequest(request).request;
+    }
+    request=structuredClone(request);
     if(!Array.isArray(request.messages)||!Array.isArray(request.tools))throw Error('Native Pi request capture unavailable');
     record.steps.push({request});event({type:'request',index:record.steps.length-1,request});checkpoint();return request;
   };
@@ -92,11 +104,21 @@ export async function runDelegatedTask(input, options) {
   const timer=setTimeout(()=>{interrupted='timeout';manager.shutdown();void session.abort();},options.timeoutMs);
   checkpoint();
   try {
-    await session.prompt(task.prompt+'\n\n'+options.promptSuffix);
-    if(interrupted||last?.stopReason!=='stop')throw Error(interrupted??last?.errorMessage??'Incomplete teacher response');
-    if(manager.list().some(a=>!a.finishedAt))throw Error('Teacher ended while a worker was still running');
+    const prompts=[task.prompt,...followups];
+    const turns=[];
+    for(let i=0;i<prompts.length;i++) {
+      if(i>0)plan.reset();
+      last=undefined;
+      const suffix=options.promptSuffix?'\n\n'+options.promptSuffix:'';
+      await session.prompt(prompts[i]+suffix);
+      if(interrupted||last?.stopReason!=='stop')throw Error(interrupted??last?.errorMessage??'Incomplete teacher response');
+      if(manager.list().some(a=>!a.finishedAt))throw Error('Teacher ended while a worker was still running');
+      turns.push({index:i+1,userPrompt:prompts[i],completed:true});
+      record.conversation={allTurnsCompleted:turns.length===prompts.length,turns};
+      checkpoint();
+    }
     const final=await verify();record.checks=final.checks;
-    record.delegationAcceptance=delegationEligibility({agents:manager.list(),messages:record.messages,events:record.delegationEvents,checks:record.checks,teacher:options.teacherIdentity});
+    record.delegationAcceptance=delegationEligibility({agents:manager.list(),messages:record.messages,events:record.delegationEvents,checks:record.checks,teacher:options.teacherIdentity,conversation:record.conversation});
     if(final.passed&&record.delegationAcceptance.passed)record.status='passed';
   }catch(e){record.error=String(e.message);}
   finally {

@@ -14,6 +14,7 @@ import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { dataRoot, envInteger, readConfig } from "./config.js";
 import { countMessage, emptyCounters, type WorkCounters } from "./project-participation.js";
+import { WORKSPACE_MOUNT } from "./sandbox.js";
 
 export const SUBAGENT_TOOLS = ["read", "write", "edit", "bash", "grep", "find", "ls"] as const;
 
@@ -85,17 +86,23 @@ function textOf(message: any): string {
 }
 
 /** The pi command the rwkv-pi CLI uses, in non-interactive JSON mode. */
-function piCommand(task: string): { command: string; args: string[] } {
+function piCommand(task: string): { command: string; args: string[]; source?: string } {
   const config = readConfig();
-  const source = process.env.RWKV_PI_SOURCE ? resolve(process.env.RWKV_PI_SOURCE) : undefined;
+  const defaultSource = fileURLToPath(new URL("../.upstream/pi", import.meta.url));
+  const source = process.env.RWKV_PI_SOURCE !== undefined
+    ? (process.env.RWKV_PI_SOURCE.trim() ? resolve(process.env.RWKV_PI_SOURCE) : undefined)
+    : existsSync(join(defaultSource, "packages/coding-agent/src/experimental/source-resolver.ts"))
+      ? defaultSource
+      : undefined;
   const piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
   const piCli = source ? join(source, "packages/coding-agent/src/cli.ts") : join(dirname(piEntry), "bundle", "cli.js");
   const preload = source ? ["--import", pathToFileURL(join(source, "packages/coding-agent/src/experimental/source-resolver.ts")).href] : [];
   const extension = fileURLToPath(new URL("./extension.js", import.meta.url));
   return {
     command: process.execPath,
+    ...(source ? { source } : {}),
     args: [...preload, piCli, "--no-extensions", "--extension", extension, "--provider", "rwkv", "--model", config.modelId, "--thinking", "high",
-      "--tools", SUBAGENT_TOOLS.join(","), "--no-skills", "--no-context-files", "--no-prompt-templates",
+      "--tools", SUBAGENT_TOOLS.join(","), "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-mcp",
       "--mode", "json", "-p", "--no-session", task],
   };
 }
@@ -188,11 +195,16 @@ export class SubagentManager {
       this.bases.set(agent.id, manifest(fork));
       mount = ["--bind", fork, this.inner];
     }
-    // Paths the main agent wrote in terms of the real workspace refer to the mount inside the sandbox.
-    const task = this.inner === this.cwd || this.limits.translateTaskPaths === false
-      ? agent.task : agent.task.split(this.cwd).join(this.inner);
-    const { command, args } = piCommand(task);
-    const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: agentDir };
+    // Paths the main agent wrote in terms of the real workspace or sandbox /workspace refer to the mount inside the child sandbox.
+    let task = agent.task;
+    if (this.inner !== this.cwd && this.limits.translateTaskPaths !== false) {
+      task = task.split(this.cwd).join(this.inner);
+      if (this.inner !== WORKSPACE_MOUNT && this.cwd !== WORKSPACE_MOUNT) {
+        task = task.replace(/(?<![\w.-])\/workspace(?=\/|$|[\s"'`),;:])/g, this.inner);
+      }
+    }
+    const { command, args, source } = piCommand(task);
+    const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: agentDir, ...(source ? { RWKV_PI_SOURCE: source } : {}) };
     for (const key of Object.keys(env)) if (key.startsWith("TEACHER_") || key.startsWith("DEEPSEEK_") || key.startsWith("STEP_")) delete env[key];
     // A read-only host mount still permits reading files: mask the paid main-agent key as well.
     const mainKey = process.env.TEACHER_API_KEY_FILE;

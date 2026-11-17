@@ -126,16 +126,20 @@ def _calls(step_name: str, trajectory: dict) -> tuple[list[Call], bool]:
 
 
 def _effective(calls: list[Call]) -> tuple[int, int]:
-    """An identical call repeated with no file modification in between is not progress."""
+    """An identical call repeated with no file modification in between is not progress; worklist bookkeeping is neutral."""
     seen: set[str] = set()
     repeated = 0
+    workspace = 0
     for c in calls:
+        if c.category == cat.TASK_PLANNING:
+            continue
+        workspace += 1
         if c.category == cat.FILE_MODIFICATION:
             seen.clear()
         if c.signature in seen:
             repeated += 1
         seen.add(c.signature)
-    return len(calls) - repeated, repeated
+    return workspace - repeated, repeated
 
 
 def _repairs(calls: list[Call]) -> tuple[int, bool]:

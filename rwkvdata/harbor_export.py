@@ -168,8 +168,21 @@ def _checks(bundle: Bundle, commands: list[str] | None, fault_record: str | None
     return spec
 
 
-def export(bundle: Bundle, out_root: Path, *, faults: dict | None = None, agent_timeout: int = 1800,
-           verifier_timeout: int = 600) -> Path:
+def task_dockerfile(base_image: str | None = None) -> str:
+    """Task Dockerfile: either the full standalone recipe or a fast layer on top of a prebuilt base image."""
+    if not base_image:
+        return DOCKERFILE
+    return (
+        f"FROM {base_image}\n"
+        "ENV DEBIAN_FRONTEND=noninteractive LANG=C.UTF-8 \\\n"
+        "    http_proxy= https_proxy= HTTP_PROXY= HTTPS_PROXY= no_proxy= NO_PROXY=\n"
+        "WORKDIR /app\n"
+        "COPY workspace/ /app/\n"
+    )
+
+
+def export(bundle: Bundle, out_root: Path, *, faults: dict | None = None, base_image: str | None = None,
+           agent_timeout: int = 1800, verifier_timeout: int = 600) -> Path:
     """Write one Harbor task directory and return its path. Overwrites nothing.
 
     `faults` is the report from faults.validate(); with killed mutants the final turn
@@ -199,7 +212,7 @@ def export(bundle: Bundle, out_root: Path, *, faults: dict | None = None, agent_
         target = workspace / rel
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
-    (tmp / "environment" / "Dockerfile").write_text(DOCKERFILE)
+    (tmp / "environment" / "Dockerfile").write_text(task_dockerfile(base_image))
     (tmp / "environment" / "docker-compose.yaml").write_text(COMPOSE_OVERRIDE)
 
     source_sha = hashlib.sha256(bundle.source_path.read_bytes()).hexdigest()

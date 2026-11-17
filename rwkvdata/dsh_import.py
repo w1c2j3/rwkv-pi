@@ -16,7 +16,7 @@ import re
 import shutil
 from pathlib import Path
 
-from .harbor_export import COMPOSE_OVERRIDE, DOCKERFILE, _toml_str
+from .harbor_export import COMPOSE_OVERRIDE, _toml_str, task_dockerfile
 
 PREFIX = "dsh-"
 PI_TOOLS = {"read", "edit", "write", "bash"}
@@ -165,6 +165,21 @@ def _zh(text: str) -> bool:
     return len(re.findall(r"[一-鿿]", text)) > len(re.findall(r"[A-Za-z]+", text)) / 2
 
 
+def _pi_expect_tools(expect: dict) -> dict:
+    """Expand DSH required_tools entries with their Pi tool names so judge.py matches Pi session logs."""
+    expect = json.loads(json.dumps(expect))
+    for turn in expect.get("turns") or []:
+        if not turn or not isinstance(turn.get("required_tools"), list):
+            continue
+        mapped = []
+        for want in turn["required_tools"]:
+            alts = list(want) if isinstance(want, list) else [want]
+            expanded = list(dict.fromkeys([*alts, *(d for a in alts for d in OLD_TO_DSH.get(a, [a]) if d in PI_TOOLS)]))
+            mapped.append(expanded if len(expanded) > 1 or isinstance(want, list) else expanded[0])
+        turn["required_tools"] = mapped
+    return expect
+
+
 def _mappable(expect: dict) -> bool:
     for turn in expect.get("turns") or []:
         for want in (turn or {}).get("required_tools") or []:
@@ -192,14 +207,14 @@ def skip_reason(row: dict, task: Path, translations: dict | None = None) -> str 
 
 
 def import_task(row: dict, task: Path, out_root: Path, agent_timeout: int = 900, verifier_timeout: int = 300,
-                translated: list[str] | None = None) -> Path:
+                translated: list[str] | None = None, base_image: str | None = None) -> Path:
     name = f"{PREFIX}{row['dataset']}-{row['task_id']}"
     task_dir = out_root / name
     if task_dir.exists():
         raise FileExistsError(task_dir)
     turns_file = task / "environment" / "turns.json"
     turns = json.loads(turns_file.read_text()) if turns_file.is_file() else [(task / "instruction.md").read_text()]
-    expect = json.loads((task / "tests" / "expect.json").read_text())
+    expect = _pi_expect_tools(json.loads((task / "tests" / "expect.json").read_text()))
     if translated:
         if len(translated) != len(turns):
             raise ValueError(f"{name}: translation turn count")
@@ -207,7 +222,7 @@ def import_task(row: dict, task: Path, out_root: Path, agent_timeout: int = 900,
     tmp = out_root / f".{name}.partial"
     shutil.rmtree(tmp, ignore_errors=True)
     shutil.copytree(task / "environment" / "workspace", tmp / "environment" / "workspace", symlinks=True)
-    (tmp / "environment" / "Dockerfile").write_text(DOCKERFILE)
+    (tmp / "environment" / "Dockerfile").write_text(task_dockerfile(base_image))
     (tmp / "environment" / "docker-compose.yaml").write_text(COMPOSE_OVERRIDE)
     steps = [f"step-{i + 1}" for i in range(len(turns))]
     meta = {k: row.get(k) for k in ("dataset", "task_id", "bucket", "category", "requirement", "origin_bank",
@@ -238,7 +253,7 @@ def import_task(row: dict, task: Path, out_root: Path, agent_timeout: int = 900,
     return task_dir
 
 
-def run(root: Path, out_root: Path, translations: Path | None = None) -> dict:
+def run(root: Path, out_root: Path, translations: Path | None = None, *, base_image: str | None = None) -> dict:
     """Import every eligible task; English tasks only when `translations` ({task name: [Chinese turns]}) has them."""
     out_root.mkdir(parents=True, exist_ok=True)
     zh = json.loads(translations.read_text()) if translations else {}
@@ -251,7 +266,7 @@ def run(root: Path, out_root: Path, translations: Path | None = None) -> dict:
             reason = "exists"
         if reason is None:
             name = f"{PREFIX}{row['dataset']}-{row['task_id']}"
-            import_task(row, task, out_root, translated=zh.get(name))
+            import_task(row, task, out_root, translated=zh.get(name), base_image=base_image)
             reason = "imported_translated" if name in zh else "imported"
         counts[reason] = counts.get(reason, 0) + 1
     return counts

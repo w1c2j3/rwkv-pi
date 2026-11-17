@@ -2,8 +2,11 @@ import { isAbsolute, resolve, sep } from "node:path";
 import { PI_TOOL_NAMES, type PiToolName } from "./tools.js";
 import { parseEnvironment, type TaskEnvironment } from "./environment.js";
 
+export const WEB_TOOL_NAMES = ["web_search", "web_fetch"] as const;
+export type WebToolName = (typeof WEB_TOOL_NAMES)[number];
+export const TASK_TOOL_NAMES = [...PI_TOOL_NAMES, ...WEB_TOOL_NAMES] as const;
 export type Split = "train" | "validation" | "test" | "smoke";
-export type ToolName = PiToolName;
+export type ToolName = PiToolName | WebToolName;
 export type Check = { type: "file_equals"; path: string; expected: string }
   | { type: "command"; argv: string[]; timeoutMs: number; expectedStdout?: string };
 export interface Task {
@@ -43,8 +46,8 @@ export function parseTask(value: unknown): Task {
     if (typeof content !== "string") throw new Error(`Task file ${path} must contain text.`);
   }
   if (!Array.isArray(value.tools) || !value.tools.length || new Set(value.tools).size !== value.tools.length
-    || value.tools.some((tool) => !(PI_TOOL_NAMES as readonly unknown[]).includes(tool))) {
-    throw new Error(`Task tools must select distinct tools from ${PI_TOOL_NAMES.join(", ")}.`);
+    || value.tools.some((tool) => !(TASK_TOOL_NAMES as readonly unknown[]).includes(tool))) {
+    throw new Error(`Task tools must select distinct tools from ${TASK_TOOL_NAMES.join(", ")}.`);
   }
   if (value.environment !== undefined) parseEnvironment(value.environment);
   if (!Array.isArray(value.checks) || !value.checks.length) throw new Error("Task requires independent acceptance checks.");

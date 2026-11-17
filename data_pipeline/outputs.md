@@ -35,9 +35,8 @@ when their turn arrives. The question hash includes the full task and followups.
 endpoint, reasoning settings, prompt, and runtime identity, excluding secrets. `profile.example.json` is a schema
 example; actual private paths, supported models, and verified prices are required for execution.
 
-The collector currently supports **OpenAI Chat Completions-compatible APIs** through the existing native Pi runtime,
-retaining its full system prompt, Chinese constraints, tool observations, and teacher output. Responses-only or
-Anthropic-only models need corresponding adapters. The current native renderer/tokenizer export is XML+JSON.
+The collector supports **OpenAI Chat Completions (`openai-completions`) and Responses (`openai-responses`) APIs** through the existing native Pi runtime,
+retaining its full system prompt, Chinese constraints, tool observations, and teacher output. When a task's tools or the profile's `webTools` configuration enable `web_search` and `web_fetch`, calls are rate-limited and accounted in the same ledger. The current native renderer/tokenizer export is XML+JSON.
 
 ### Accounting and delegation
 
@@ -49,9 +48,8 @@ cannot borrow it. A module's generic CNY10 trial default is not a new user autho
 budget configuration is required for actual spending.
 
 Real delegation uses `delegated_rollout.mjs`: a strong teacher plans/reviews and actual RWKV children execute. Child
-outputs are teacher observations, not teacher-authored answers. This adapter currently supports ordinary Linux sandbox
-tasks with one user request. Delegated followups are explicitly rejected. Ordinary nondelegated collection supports
-sequential native multi-user-turn followups.
+outputs are teacher observations, not teacher-authored answers. Both delegated and ordinary nondelegated collection
+support sequential native multi-user-turn followups in the same workspace and session (with the subagent plan reset between turns).
 
 ### Review and export
 

@@ -67,6 +67,10 @@ class TestExport(unittest.TestCase):
             self.assertIn('schema_version = "1.4"', (task / "task.toml").read_text())
             with self.assertRaises(FileExistsError):
                 harbor_export.export(bundle.load(_bundle_file(root)), root / "out")
+            fast = harbor_export.export(bundle.load(_bundle_file(root)), root / "out-fast",
+                                        base_image="rwkv-pi-harbor-base:1.5.0")
+            self.assertIn("FROM rwkv-pi-harbor-base:1.5.0\n", (fast / "environment/Dockerfile").read_text())
+            self.assertNotIn("apt-get", (fast / "environment/Dockerfile").read_text())
 
 
 def _step(i, calls=(), message="", errors=()):
@@ -100,6 +104,18 @@ class TestQC(unittest.TestCase):
             self.assertEqual(r.repair_iterations, 1)
             self.assertEqual(r.repeated_calls, 1)  # second identical run after the fix, no edit between
             self.assertEqual(r.effective_calls, 23)
+            self.assertEqual(r.verdict, "accept", r.reasons)
+
+    def test_web_tools_mapped_to_web_browsing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            calls = [("read", {"path": f"f{k}"}) for k in range(18)]
+            calls += [("web_search", {"query": "RWKV"}), ("web_fetch", {"url": "https://example.com"})]
+            s1 = [_step(1, calls), _step(2, [("bash", {"command": "make test"})], errors=(0,)),
+                  _step(3, [("edit", {"path": "f1"})]), _step(4, [("bash", {"command": "make test"})]),
+                  _step(5, message="完成")]
+            r = qc.evaluate(self._trial(Path(tmp), [s1]))
+            self.assertEqual(r.by_category["web_browsing"], 2)
+            self.assertEqual(r.unknown_tools, [])
             self.assertEqual(r.verdict, "accept", r.reasons)
 
     def test_copied_context_excluded_and_unanswered_rejected(self):
@@ -168,6 +184,43 @@ class TestSpendPricing(unittest.TestCase):
                 "final_metrics": {"total_prompt_tokens": 10**6, "total_cached_tokens": 0,
                                   "total_completion_tokens": 0}}
         self.assertAlmostEqual(collect.step_cost_cny(traj), 2.0)
+
+
+class TestSelfHostedDeepSeek(unittest.TestCase):
+    def test_harbor_command_and_models_script_for_self_hosted_ds41f(self):
+        from rwkvdata import dsh_import, pi_agent
+        cmd = collect.harbor_command(
+            "harbor", Path("/tmp/task"), ["q1"], Path("/tmp/jobs"), "job-1", 32,
+            model="deepseek/rwkv-ds41f-1017",
+            base_url="http://127.0.0.1:58866/v1",
+        )
+        self.assertIn("deepseek/rwkv-ds41f-1017", cmd)
+        self.assertIn("base_url=http://127.0.0.1:58866/v1", cmd)
+        script = pi_agent._models_json_script("http://127.0.0.1:58866/v1/")
+        self.assertIn("http://127.0.0.1:58866/v1/", script)
+        self.assertIn("x-litellm-session-id", script)
+        self.assertIn("rwkv-ds41f-1017", script)
+        self.assertIn("requiresReasoningContentOnAssistantMessages", script)
+        self.assertIn("exposeSessionEnvironment: false", pi_agent.PARITY_EXTENSION)
+        mapped = dsh_import._pi_expect_tools({"turns": [{"required_tools": ["read_file", ["replace_lines", "write_file"]]}]})
+        self.assertEqual(mapped["turns"][0]["required_tools"], [["read_file", "read"], ["replace_lines", "write_file", "edit", "write"]])
+
+    def test_collected_requires_all_expected_steps_with_trajectories(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            tasks_dir = root / "tasks"
+            for n in (1, 2):
+                (tasks_dir / "q1" / "steps" / f"step-{n}").mkdir(parents=True)
+            trial = root / "jobs" / "batch-001" / "q1__abc"
+            (trial / "steps" / "step-1" / "agent").mkdir(parents=True)
+            # Empty step-1 without trajectory.json is neither reached nor collected.
+            self.assertEqual(collect.collected(root / "jobs", tasks_dir=tasks_dir), set())
+            (trial / "steps" / "step-1" / "agent" / "trajectory.json").write_text("{}")
+            # Partial trial (1 of 2 steps) is not marked collected when tasks_dir has 2 steps.
+            self.assertEqual(collect.collected(root / "jobs", tasks_dir=tasks_dir), set())
+            (trial / "steps" / "step-2" / "agent").mkdir(parents=True)
+            (trial / "steps" / "step-2" / "agent" / "trajectory.json").write_text("{}")
+            self.assertEqual(collect.collected(root / "jobs", tasks_dir=tasks_dir), {"q1"})
 
 
 if __name__ == "__main__":

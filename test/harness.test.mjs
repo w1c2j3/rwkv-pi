@@ -139,6 +139,33 @@ test("task manifests reject path escapes, missing verification, duplicate IDs, a
   assert.throws(() => parse([task, { ...task, id: "other", split: "test" }]), /crosses splits/);
 });
 
+test("unsandboxed bash keeps exposeSessionEnvironment=false parity and sequential followups record conversation turns", async (t) => {
+  const { options } = await setup(t, (_body, index) => {
+    if (index === 1) return { deltas: [toolCall("write", { path: "output.txt", content: "TURN1\n" }, "f1")], finish: "tool_calls" };
+    if (index === 2) return { deltas: [{ content: "Turn 1 complete." }] };
+    if (index === 3) return { deltas: [toolCall("write", { path: "output.txt", content: "HELLO PI\n" }, "f2")], finish: "tool_calls" };
+    return { deltas: [{ content: "Turn 2 complete." }] };
+  });
+  const bashTask = { ...task, tools: ["read", "write", "bash"] };
+  const { record } = await runTask(bashTask, {
+    ...options,
+    maxRequests: 6,
+    historyMode: "full",
+    appendSystemPrompt: "TEST_APPEND_CONSTRAINT",
+    promptSuffix: "TEST_SUFFIX",
+    followups: ["Now overwrite output.txt with HELLO PI."],
+  });
+  assert.equal(record.status, "passed", record.error);
+  assert.equal(record.historyMode, "full");
+  assert.equal(record.appendSystemPrompt, "TEST_APPEND_CONSTRAINT");
+  assert.equal(record.promptSuffix, "TEST_SUFFIX");
+  assert.equal(record.conversation?.allTurnsCompleted, true);
+  assert.equal(record.conversation?.turns.length, 2);
+  const sysText = record.steps[0].request.messages[0].content;
+  assert.doesNotMatch(sysText, /PI_\* environment variables/, "unsandboxed bash matches sandbox prompt rules");
+  assert.match(sysText, /TEST_APPEND_CONSTRAINT/);
+});
+
 test("provenance refuses to label npm code as a source checkout just because an env variable is set", () => {
   const root = fileURLToPath(new URL("../", import.meta.url));
   assert.throws(() => execFileSync(process.execPath, ["--input-type=module", "-e",

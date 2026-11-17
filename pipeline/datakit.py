@@ -72,6 +72,8 @@ def pretty_json(value) -> str:
 def require_data_root(path) -> Path:
     """Refuse any output that is not on the mounted F: data root."""
     path = Path(path).resolve()
+    if os.environ.get('RWKV_ALLOW_SERVER_DATA_ROOT') == '1':
+        return path
     if not Path('/mnt/f').is_mount() or not path.is_relative_to(DATA):
         raise ValueError(f'Mounted F: data root required, got {path}')
     return path

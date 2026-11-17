@@ -17,7 +17,7 @@ def question_identity(bundle):
     return digest(encoded({'task':t,'followups':bundle.get('followups',[])}))
 def profile_identity(profile):
     # Keys and credential locations do not enter dataset metadata or identity.
-    fields=('provider','model','baseUrl','api','thinking','contextWindow','maxTokens','samplingParams','compat','systemPromptProfile','appendSystemPrompt','promptSuffix','protocol','adapterRevision','runtimeRevision','studentProfile')
+    fields=('provider','model','baseUrl','api','thinking','contextWindow','maxTokens','samplingParams','compat','systemPromptProfile','appendSystemPrompt','promptSuffix','protocol','adapterRevision','runtimeRevision','studentProfile','historyMode','epochBudgetTokens','epochKeepRecentPairs','epochMaxResultTokens')
     selected={k:profile[k]for k in fields if k in profile}
     for field in ('provider','model','baseUrl','api','thinking','protocol'):assert selected.get(field),field
     url=urlsplit(selected['baseUrl']);assert url.scheme in ('https','http') and url.hostname and not (url.username or url.password or url.query or url.fragment),'Endpoint must not contain credentials'
@@ -84,7 +84,7 @@ def export_training(questions,entries,out):
         generation=run.get('generation',{})
         for k,gk in [('thinking','thinkingLevel'),('contextWindow','contextWindow'),('maxTokens','maxTokens')]:
             if k in ps:assert generation.get(gk)==ps[k],'Generation profile mismatch: '+k
-        for field in ('appendSystemPrompt','promptSuffix'):
+        for field in ('appendSystemPrompt','promptSuffix','historyMode'):
             if field in ps:assert run.get(field)==ps[field],'Prompt profile mismatch: '+field
         assistants=[m for m in run['messages']if m['role']=='assistant']
         assert assistants and all(m.get('provider')==ps['provider'] and m.get('model')==ps['model']for m in assistants),'Mixed teacher messages'

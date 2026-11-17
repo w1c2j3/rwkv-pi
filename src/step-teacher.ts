@@ -33,6 +33,11 @@ export function readStepConfig(env: NodeJS.ProcessEnv = process.env): StepConfig
     RWKV_API_KEY: env.STEP_API_KEY, RWKV_API_KEY_FILE: env.STEP_API_KEY_FILE,
     RWKV_CONTEXT_WINDOW: env.STEP_CONTEXT_WINDOW || (model === "step-5-preview" ? "1000000" : "256000"),
     RWKV_MAX_TOKENS: env.STEP_MAX_TOKENS || "16384",
+    RWKV_HISTORY_MODE: env.STEP_HISTORY_MODE ?? env.RWKV_HISTORY_MODE,
+    RWKV_EPOCH_BUDGET_TOKENS: env.STEP_EPOCH_BUDGET_TOKENS ?? env.RWKV_EPOCH_BUDGET_TOKENS,
+    RWKV_EPOCH_HARD_SLACK_TOKENS: env.STEP_EPOCH_HARD_SLACK_TOKENS ?? env.RWKV_EPOCH_HARD_SLACK_TOKENS,
+    RWKV_EPOCH_KEEP_RECENT_PAIRS: env.STEP_EPOCH_KEEP_RECENT_PAIRS ?? env.RWKV_EPOCH_KEEP_RECENT_PAIRS,
+    RWKV_EPOCH_MAX_RESULT_TOKENS: env.STEP_EPOCH_MAX_RESULT_TOKENS ?? env.RWKV_EPOCH_MAX_RESULT_TOKENS,
   });
   if (!config.apiKey) throw new Error("The Step API key file is empty.");
   const contextLimit = model === "step-5-preview" ? 1000000 : 256000;
@@ -51,8 +56,24 @@ export function createStepProvider(config: StepConfig = readStepConfig()): Provi
     compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false,
       supportsStrictMode: false, maxTokensField: "max_tokens" },
   };
-  return createProvider({
+  return Object.assign(createProvider({
     id: "stepfun", models: [model], baseUrl: config.baseUrl, api: openAICompletionsApi(),
     auth: { apiKey: { name: "StepFun official API key", resolve: async () => ({ auth: { apiKey: config.apiKey } }) } },
+  }), {
+    rwkvPiHistoryMode: config.historyMode,
+    ...(config.historyMode === "epoch" ? {
+      rwkvPiEpochConfig: {
+        budgetTokens: config.epochBudgetTokens,
+        keepRecentPairs: config.epochKeepRecentPairs,
+        maxResultTokens: config.epochMaxResultTokens,
+      },
+    } : {}),
+    ...(config.historyMode === "worklist" ? {
+      rwkvPiWorklistConfig: {
+        budgetTokens: config.worklistBudgetTokens,
+        keepRecentPairs: config.worklistKeepRecentPairs,
+        foldTriggerTokens: config.worklistFoldTriggerTokens,
+      },
+    } : {}),
   });
 }

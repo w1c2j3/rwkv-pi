@@ -6,6 +6,7 @@ import { loadEnvFile } from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readConfig } from "./config.js";
 import { DEFAULT_PI_TOOLS, parseToolList } from "./tools.js";
+import { WORKLIST_TOOL_NAMES } from "./worklist.js";
 import { readTeacherConfig } from "./teacher.js";
 import { stallLimits } from "./stall-detector.js";
 import { collaborationDataRoot } from "./collab-trace.js";
@@ -27,7 +28,12 @@ if ((ACCOUNT_COMMANDS as readonly string[]).includes(command ?? "")) {
   // Without an engine in the environment, use the saved connection; a first launch asks for a token.
   if (!configuredByEnv()) applyProfile(readProfile() ?? await login());
   const config = readConfig();
-  const source = process.env.RWKV_PI_SOURCE ? resolve(process.env.RWKV_PI_SOURCE) : undefined;
+  const defaultSource = fileURLToPath(new URL("../.upstream/pi", import.meta.url));
+  const source = process.env.RWKV_PI_SOURCE !== undefined
+    ? (process.env.RWKV_PI_SOURCE.trim() ? resolve(process.env.RWKV_PI_SOURCE) : undefined)
+    : existsSync(join(defaultSource, "packages/coding-agent/src/experimental/source-resolver.ts"))
+      ? defaultSource
+      : undefined;
   const piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
   const piCli = source ? join(source, "packages/coding-agent/src/cli.ts") : join(dirname(piEntry), "bundle", "cli.js");
   const preload = source ? ["--import", pathToFileURL(join(source, "packages/coding-agent/src/experimental/source-resolver.ts")).href] : [];
@@ -51,11 +57,13 @@ if ((ACCOUNT_COMMANDS as readonly string[]).includes(command ?? "")) {
   }
   const userArgs = plugins.args;
   const userTools = userArgs.some((arg) => arg === "--tools" || arg === "-t" || arg.startsWith("--tools="));
-  const tools = userTools ? [] : ["--tools", [...parseToolList(process.env.RWKV_TOOLS?.trim() || DEFAULT_PI_TOOLS), ...subagentTools].join(",")];
-  // Training parity: the harness renders no skills, context files or prompt templates.
+  const worklistTools = config.historyMode === "worklist" ? [...WORKLIST_TOOL_NAMES] : [];
+  const tools = userTools ? [] : ["--tools", [...parseToolList(process.env.RWKV_TOOLS?.trim() || DEFAULT_PI_TOOLS), ...worklistTools, ...subagentTools].join(",")];
+  // Training parity: the harness renders no skills, context files, prompt templates or MCP declarations.
   // RWKV_PI_PARITY=0 restores pi's discovery for exploratory use (the model never saw those prompts).
   const parity = process.env.RWKV_PI_PARITY?.trim() !== "0";
-  const parityArgs = parity ? ["--no-skills", "--no-context-files", "--no-prompt-templates"] : [];
+  const parityArgs = parity ? ["--no-skills", "--no-context-files", "--no-prompt-templates", "--no-mcp"] : [];
+  const childEnv = source ? { ...process.env, RWKV_PI_SOURCE: source } : process.env;
   const child = spawn(process.execPath, [
     ...preload,
     piCli,
@@ -70,7 +78,7 @@ if ((ACCOUNT_COMMANDS as readonly string[]).includes(command ?? "")) {
     ...tools,
     ...parityArgs,
     ...userArgs,
-  ], { stdio: "inherit", env: process.env });
+  ], { stdio: "inherit", env: childEnv });
 
   const forward = (signal: NodeJS.Signals) => child.kill(signal);
   process.on("SIGINT", forward);

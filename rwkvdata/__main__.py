@@ -73,6 +73,11 @@ def cmd_faults(args) -> None:
 
 
 def cmd_export(args) -> None:
+    if args.print_base_dockerfile:
+        print(harbor_export.DOCKERFILE.replace("COPY workspace/ /app/\n", ""), end="")
+        return
+    if not args.out or not args.inputs:
+        raise SystemExit("export requires inputs and --out (unless --print-base-dockerfile is set)")
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     reviewed = bundle_mod.load_turns(args.turns) if args.turns else {}
@@ -85,7 +90,7 @@ def cmd_export(args) -> None:
         report = None
         if args.faults_dir and (Path(args.faults_dir) / f"{b.id}.json").is_file():
             report = json.loads((Path(args.faults_dir) / f"{b.id}.json").read_text())
-        print(harbor_export.export(b, out, faults=report))
+        print(harbor_export.export(b, out, faults=report, base_image=args.base_image))
 
 
 def cmd_qc(args) -> None:
@@ -100,20 +105,21 @@ def cmd_finalize(args) -> None:
     """QC every complete trial, write <trial>/qc.json and the merged, validated <trial>/trajectory.json
     (shared `extra` included), and print one summary line per trial plus totals."""
     rows = []
+    tasks_dir = Path(args.tasks) if getattr(args, "tasks", None) else None
     for trial in map(Path, args.trials):
-        steps = sorted((trial / "steps").glob("step-*")) if (trial / "steps").is_dir() else []
-        if not steps or any(not (s / "agent" / "trajectory.json").is_file() for s in steps):
-            rows.append({"trial": trial.name, "status": "incomplete"})
+        if not collect._trial_complete(trial, tasks_dir):
+            rows.append({"trial": trial.name, "task_id": trial.name.split("__")[0], "status": "incomplete"})
             continue
         report = qc.evaluate(trial)
         (trial / "qc.json").write_text(qc.to_json(report))
-        row = {"trial": trial.name, "status": "ok", "verdict": report.verdict, "reasons": report.reasons,
+        task_id = trial.name.split("__")[0]
+        row = {"trial": trial.name, "task_id": task_id, "status": "ok", "verdict": report.verdict, "reasons": report.reasons,
                "effective_calls": report.effective_calls, "repairs": report.repair_iterations,
                "final_turn_repairs": report.final_turn_repairs, "tests_pass": report.final_tests_pass,
                "fault_injected": bool(report.fault and report.fault["injected"]),
                "cost_cny": round(collect.trial_cost_cny(trial), 4)}
         try:
-            out = atif.finalize(trial, task_id=trial.name.split("__")[0], qc_verdict=report.verdict,
+            out = atif.finalize(trial, task_id=task_id, qc_verdict=report.verdict,
                                 pi_version=args.harness_version, teacher_model=args.model,
                                 reasoning_effort=args.reasoning_effort)
             merged = json.loads(out.read_text())
@@ -124,18 +130,32 @@ def cmd_finalize(args) -> None:
         except (ValueError, FileNotFoundError) as exc:
             row.update(atif_valid=False, atif_error=str(exc)[:300])
         rows.append(row)
+    if not getattr(args, "all_trials", False):
+        best_by_task: dict[str, int] = {}
+        for idx, row in enumerate(rows):
+            if row["status"] != "ok":
+                continue
+            tid = row["task_id"]
+            prev = best_by_task.get(tid)
+            if prev is None or (row["verdict"] == "accept" or rows[prev]["verdict"] != "accept"):
+                best_by_task[tid] = idx
+        for idx, row in enumerate(rows):
+            if row["status"] == "ok" and best_by_task.get(row["task_id"]) != idx:
+                row["status"] = "superseded"
     for row in rows:
         print(json.dumps(row, ensure_ascii=False))
     ok = [r for r in rows if r["status"] == "ok"]
+    all_done = [r for r in rows if r["status"] in ("ok", "superseded")]
     print(json.dumps({"trials": len(rows), "complete": len(ok),
                       "accepted": sum(r["verdict"] == "accept" for r in ok),
                       "atif_valid": sum(bool(r.get("atif_valid")) for r in ok),
-                      "cost_cny": round(sum(r["cost_cny"] for r in ok), 4)}), file=sys.stderr)
+                      "cost_cny": round(sum(r["cost_cny"] for r in all_done), 4)}), file=sys.stderr)
 
 
 def cmd_dsh_import(args) -> None:
     print(json.dumps(dsh_import.run(Path(args.root), Path(args.out),
-                                    Path(args.translations) if args.translations else None)))
+                                    Path(args.translations) if args.translations else None,
+                                    base_image=args.base_image)))
 
 
 def main() -> None:
@@ -151,10 +171,12 @@ def main() -> None:
     s.add_argument("--all", dest="count", action="store_const", const=0, help="no total limit")
     s.set_defaults(func=cmd_select)
     e = sub.add_parser("export")
-    e.add_argument("inputs", nargs="+")
-    e.add_argument("--out", required=True)
+    e.add_argument("inputs", nargs="*")
+    e.add_argument("--out")
     e.add_argument("--faults-dir", help="validated fault reports from `faults`; enables the debugging turn")
     e.add_argument("--turns", help="JSON-lines {id, turns} of reviewed user turns to use instead of the bundle's")
+    e.add_argument("--base-image", help="prebuilt Harbor base image (skips per-task apt/Node/Pi network install)")
+    e.add_argument("--print-base-dockerfile", action="store_true", help="print the prebuilt base Dockerfile and exit")
     e.set_defaults(func=cmd_export)
     f = sub.add_parser("faults")
     f.add_argument("tasks", nargs="+")
@@ -167,6 +189,8 @@ def main() -> None:
     q.set_defaults(func=cmd_qc)
     z = sub.add_parser("finalize")
     z.add_argument("trials", nargs="+")
+    z.add_argument("--tasks", help="optional tasks root to verify all expected step-N trajectories exist")
+    z.add_argument("--all-trials", action="store_true", help="keep superseded retry trials as status=ok")
     z.add_argument("--harness-version", default=collect.PI_VERSION)
     z.add_argument("--model", default=collect.MODEL)
     z.add_argument("--reasoning-effort", default=None)
@@ -175,6 +199,7 @@ def main() -> None:
     d.add_argument("root", help="rwkv-dsh-training-questions/harbor")
     d.add_argument("out")
     d.add_argument("--translations", help="JSON {task name: [Chinese turns]} for English tasks")
+    d.add_argument("--base-image", help="prebuilt Harbor base image (skips per-task apt/Node/Pi network install)")
     d.set_defaults(func=cmd_dsh_import)
     args = parser.parse_args()
     args.func(args)

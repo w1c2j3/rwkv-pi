@@ -64,6 +64,7 @@
 !/src/dataset-cli.ts
 !/src/dataset.ts
 !/src/environment.ts
+!/src/epoch.ts
 !/src/extension.ts
 !/src/harness-cli.ts
 !/src/harness.ts
@@ -91,6 +92,7 @@
 !/src/tolerant-tools.ts
 !/src/tools.ts
 !/src/transport.ts
+!/src/worklist.ts
 !/src/xml.ts
 !/tasks/smoke.jsonl
 !/templates/LICENSE
@@ -101,6 +103,7 @@
 !/test/config.test.mjs
 !/test/doctor.test.mjs
 !/test/deepseek-teacher.test.mjs
+!/test/epoch.test.mjs
 !/test/harness.test.mjs
 !/test/helpers/mock-server.mjs
 !/test/integration.test.mjs
@@ -124,6 +127,7 @@
 !/test/token-budget.test.mjs
 !/test/tolerant-tools.test.mjs
 !/test/tool-adapter.test.mjs
+!/test/worklist.test.mjs
 !/tsconfig.json
 !/data_pipeline/products.py
 !/data_pipeline/execution.py

@@ -20,6 +20,14 @@ export interface RwkvConfig {
   targetFailureLimit: number;
   /** Recall-tolerant read/edit/write/ls execution (src/tolerant-tools.ts); prompts are unchanged. */
   toolTolerance: boolean;
+  /** full (default): complete conversation history; epoch: zero-tool-intrusion deterministic State Ledger folding at 16k; worklist: Stateful Work List folding (`todo_plan` + `todo_update`). */
+  historyMode: "full" | "epoch" | "worklist";
+  epochBudgetTokens: number;
+  epochKeepRecentPairs: number;
+  epochMaxResultTokens: number;
+  worklistBudgetTokens: number;
+  worklistKeepRecentPairs: number;
+  worklistFoldTriggerTokens: number;
   adapterId?: string;
   adapterVersion?: string;
   adapterScale?: number;
@@ -86,6 +94,14 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
   if (targetFailureLimit === 1) throw new Error("RWKV_TARGET_FAILURE_LIMIT must be 0 (disabled) or an integer >= 2.");
   const toleranceRaw = env.RWKV_TOOL_TOLERANCE?.trim() || "1";
   if (!["0", "1"].includes(toleranceRaw)) throw new Error("RWKV_TOOL_TOLERANCE must be 0 or 1.");
+  const historyMode = env.RWKV_HISTORY_MODE?.trim() || "full";
+  if (!["full", "epoch", "worklist"].includes(historyMode)) throw new Error("RWKV_HISTORY_MODE must be full, epoch, or worklist.");
+  const epochBudgetTokens = positiveInteger("RWKV_EPOCH_BUDGET_TOKENS", 16384);
+  const epochKeepRecentPairs = envInteger(env, "RWKV_EPOCH_KEEP_RECENT_PAIRS", 3, 1);
+  const epochMaxResultTokens = envInteger(env, "RWKV_EPOCH_MAX_RESULT_TOKENS", 4000, 0);
+  const worklistBudgetTokens = positiveInteger("RWKV_WORKLIST_BUDGET_TOKENS", 16384);
+  const worklistKeepRecentPairs = envInteger(env, "RWKV_WORKLIST_KEEP_RECENT_PAIRS", 2, 0);
+  const worklistFoldTriggerTokens = envInteger(env, "RWKV_WORKLIST_FOLD_TRIGGER_TOKENS", 12288, 0);
   if (maxTokens >= contextWindow) {
     throw new Error("RWKV_MAX_TOKENS must be smaller than RWKV_CONTEXT_WINDOW to leave room for the prompt.");
   }
@@ -107,6 +123,13 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
     identicalCallLimit,
     targetFailureLimit,
     toolTolerance: toleranceRaw === "1",
+    historyMode: historyMode as RwkvConfig["historyMode"],
+    epochBudgetTokens,
+    epochKeepRecentPairs,
+    epochMaxResultTokens,
+    worklistBudgetTokens,
+    worklistKeepRecentPairs,
+    worklistFoldTriggerTokens,
     ...(adapterId ? { adapterId } : {}),
     ...(adapterVersion ? { adapterVersion } : {}),
     ...(adapterScale !== undefined ? { adapterScale } : {}),

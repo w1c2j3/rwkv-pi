@@ -25,7 +25,9 @@ function hashTree(root: string): string {
   return hash.digest("hex");
 }
 
-export function runtimeProvenance() {
+let cachedProvenance: { key: string; value: ReturnType<typeof computeRuntimeProvenance> } | undefined;
+
+function computeRuntimeProvenance() {
   const root = fileURLToPath(new URL("../", import.meta.url));
   const piEntry = fileURLToPath(import.meta.resolve("@earendil-works/pi-coding-agent"));
   const piRoot = dirname(dirname(piEntry));
@@ -47,4 +49,12 @@ export function runtimeProvenance() {
     harnessSha256: hashTree(dirname(fileURLToPath(import.meta.url))),
     dependencyLockSha256: sha256(readFileSync(join(root, "package-lock.json"))),
   };
+}
+
+export function runtimeProvenance() {
+  const key = process.env.RWKV_PI_SOURCE ?? "";
+  if (!cachedProvenance || cachedProvenance.key !== key) {
+    cachedProvenance = { key, value: computeRuntimeProvenance() };
+  }
+  return { ...cachedProvenance.value };
 }

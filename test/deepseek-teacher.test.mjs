@@ -16,6 +16,12 @@ test('DeepSeek is opt-in; local Qwen parameters are preserved',()=>{
   assert.equal(ds.samplingParams.reasoning_effort,'high');
   assert.throws(()=>readTeacherConfig({...env,TEACHER_BASE_URL:'https://other.invalid'}),/official/);
   assert.throws(()=>readTeacherConfig({...env,TEACHER_REASONING_EFFORT:'off'}),/stays enabled/);
+  const selfHosted=createTeacherProvider(readTeacherConfig({
+    TEACHER_KIND:'deepseek',TEACHER_MODEL:'rwkv-ds41f-1017',TEACHER_BASE_URL:'http://115.29.220.210:58866/v1',
+    TEACHER_API_KEY:'fixture-not-a-key',TEACHER_SESSION_ID:'session-test-01',
+  })).getModels()[0];
+  assert.equal(selfHosted.headers['x-litellm-session-id'],'session-test-01');
+  assert.equal(selfHosted.compat.requiresReasoningContentOnAssistantMessages,true);
 });
 
 test('DeepSeek preserves every historical reasoning field across two actual codec tool turns',async()=>{

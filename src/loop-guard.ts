@@ -40,6 +40,8 @@ export function repeatedToolFailure(messages: readonly Message[], limit = 3): st
  */
 export const REPEAT_GUARD_PREFIX = "RWKV_REPEAT_GUARD:";
 export const TARGET_GUARD_PREFIX = "RWKV_TARGET_GUARD:";
+export const WORKLIST_SPIN_PREFIX = "RWKV_WORKLIST_SPIN:";
+const WORKLIST_NAMES = new Set(["todo_plan", "todo_update"]);
 
 const targetOf = (args: unknown): string | undefined => {
   const path = (args as { path?: unknown } | undefined)?.path;
@@ -99,4 +101,23 @@ export function repeatedIdenticalCall(messages: readonly Message[], name: string
     result = current;
   }
   return `${REPEAT_GUARD_PREFIX} ${name} 已连续 ${limit} 次以完全相同的参数调用并得到相同结果，本次未执行。请根据已有结果换一种操作，或给出最终答案。`;
+}
+
+/** Block a 3rd consecutive worklist bookkeeping call (`todo_plan` / `todo_update`) when no workspace tool executed in between. */
+export function repeatedWorklistSpin(messages: readonly Message[], name: string, limit = 2): string | undefined {
+  if (limit === 0 || !WORKLIST_NAMES.has(name)) return;
+  let index = messages.length - 1;
+  if (messages[index]?.role === "assistant") index--;
+  let consecutive = 0;
+  while (index >= 1 && consecutive < limit) {
+    const toolResult = messages[index];
+    const assistant = messages[index - 1];
+    if (toolResult?.role !== "toolResult" || assistant?.role !== "assistant") return;
+    const calls = assistant.content.filter((block) => block.type === "toolCall");
+    if (!calls.length || !calls.every((call) => WORKLIST_NAMES.has(call.name))) return;
+    consecutive++;
+    index -= 2;
+  }
+  if (consecutive < limit) return;
+  return `${WORKLIST_SPIN_PREFIX} 已连续调用 ${consecutive} 次工单工具而未执行工作区工具，本次未执行。请先使用工作区工具（read/edit/write/bash）推进当前子目标，若全部子目标均已完成请直接作答。`;
 }
