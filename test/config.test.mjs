@@ -19,3 +19,38 @@ test("rejects incorrect API URLs without echoing embedded credentials", () => {
   }
   assert.equal(readConfig({ RWKV_BASE_URL: "http://localhost:8000/v1/" }).baseUrl, "http://localhost:8000/v1");
 });
+
+test("parses and validates RWKV sampling overrides and sticky session ID", () => {
+  const base = readConfig({});
+  assert.equal(base.sampling, undefined);
+  assert.equal(base.sessionId, undefined);
+
+  const custom = readConfig({
+    RWKV_TEMPERATURE: "0.25",
+    RWKV_TOP_P: "0.4",
+    RWKV_TOP_K: "4096",
+    RWKV_ALPHA_PRESENCE: "0.6",
+    RWKV_ALPHA_FREQUENCY: "0.15",
+    RWKV_ALPHA_DECAY: "0.995",
+    RWKV_SESSION_ID: "trial-abc-123",
+  });
+  assert.deepEqual(custom.sampling, {
+    temperature: 0.25,
+    topP: 0.4,
+    topK: 4096,
+    alphaPresence: 0.6,
+    alphaFrequency: 0.15,
+    alphaDecay: 0.995,
+  });
+  assert.equal(custom.sessionId, "trial-abc-123");
+  assert.equal(readConfig({ RWKV_TEMPERATURE: "0" }).sampling?.temperature, 0);
+
+  assert.throws(() => readConfig({ RWKV_TEMPERATURE: "-0.1" }), /RWKV_TEMPERATURE/);
+  assert.throws(() => readConfig({ RWKV_TOP_P: "0" }), /RWKV_TOP_P/);
+  assert.throws(() => readConfig({ RWKV_TOP_P: "1.1" }), /RWKV_TOP_P/);
+  assert.throws(() => readConfig({ RWKV_TOP_K: "0" }), /RWKV_TOP_K/);
+  assert.throws(() => readConfig({ RWKV_ALPHA_PRESENCE: "-1" }), /RWKV_ALPHA_PRESENCE/);
+  assert.throws(() => readConfig({ RWKV_ALPHA_FREQUENCY: "NaN" }), /RWKV_ALPHA_FREQUENCY/);
+  assert.throws(() => readConfig({ RWKV_ALPHA_DECAY: "0" }), /RWKV_ALPHA_DECAY/);
+  assert.throws(() => readConfig({ RWKV_SESSION_ID: "bad\nid" }), /RWKV_SESSION_ID/);
+});

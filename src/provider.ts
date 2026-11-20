@@ -21,6 +21,8 @@ export function createRwkvModel(config: RwkvConfig = readConfig()): Model<"opena
     maxTokens: config.maxTokens,
     // The continuation adapter supplies the recorded RWKV sampling profile.
     samplingParams: { chat_template_kwargs: templateKwargs(true),
+      ...(config.backend === "openai" && config.sampling?.temperature !== undefined ? { temperature: config.sampling.temperature } : {}),
+      ...(config.backend === "openai" && config.sampling?.topP !== undefined ? { top_p: config.sampling.topP } : {}),
       ...(config.adapterId ? { adapter_id: config.adapterId } : {}),
       ...(config.adapterVersion ? { adapter_version: config.adapterVersion } : {}),
       ...(config.adapterScale !== undefined ? { adapter_scale: config.adapterScale } : {}),

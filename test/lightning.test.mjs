@@ -68,13 +68,13 @@ test("arbitrary chunk boundaries preserve reasoning and withhold incomplete call
 });
 
 async function endpoint(t, answers) {
-  const requests = [], stops = [], paths = [];
+  const requests = [], stops = [], paths = [], headers = [];
   const server = createServer(async (req, res) => {
     let raw = ""; for await (const part of req) raw += part;
     const body = JSON.parse(raw);
     if (req.url === "/v1/tokens/count") { res.setHeader("content-type", "application/json"); res.end('{"tokens":100}'); return; }
     if (req.url === "/v1/server/stop") { stops.push(body); res.end('{}'); return; }
-    paths.push(req.url); requests.push(body);
+    paths.push(req.url); requests.push(body); headers.push(req.headers);
     const result = answers[requests.length - 1];
     res.writeHead(200, { "content-type": "text/event-stream" });
     const emit = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: "raw-native", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason, ...(finish_reason && result.matchedStop ? { matched_stop: result.matchedStop } : {}) }] })}\n\n`);
@@ -85,7 +85,7 @@ async function endpoint(t, answers) {
   });
   server.listen(0, "127.0.0.1"); await once(server, "listening");
   t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
-  return { config: readConfig({ RWKV_BASE_URL: `http://127.0.0.1:${server.address().port}/v1` }), requests, stops, paths };
+  return { config: readConfig({ RWKV_BASE_URL: `http://127.0.0.1:${server.address().port}/v1` }), requests, stops, paths, headers };
 }
 
 test("real pi harness executes client-parsed XML and replays observations in raw continuation", async t => {
@@ -206,4 +206,75 @@ test("Lightning XML continuation is default; legacy native APIs require explicit
   const model = createRwkvProvider(readConfig({ RWKV_ADAPTER_ID: "a", RWKV_ADAPTER_VERSION: "v1", RWKV_ADAPTER_SCALE: "0" })).getModels()[0];
   assert.equal(model.samplingParams.adapter_id, "a");
   assert.equal(model.samplingParams.adapter_scale, 0);
+});
+
+test("stabilized tool-use sampling defaults, env overrides, and X-RWKV-Session-Id header forwarding", async t => {
+  const { config, requests, headers } = await endpoint(t, [
+    { text: "Tool turn.<EOD>", matchedStop: "<EOD>" },
+    { text: ">想一想。</think>Open think.<EOD>", matchedStop: "<EOD>" },
+    { text: "Fake think.<EOD>", matchedStop: "<EOD>" },
+    { text: "Env override.<EOD>", matchedStop: "<EOD>" },
+    { text: "Explicit greedy.<EOD>", matchedStop: "<EOD>" },
+  ]);
+  const toolDef = [{ name: "read", description: "read", parameters: tools[0].function.parameters }];
+  const userMsg = [{ role: "user", content: "Hi", timestamp: 1 }];
+
+  const models = createModels();
+  const baseProvider = createRwkvProvider({ ...config, sessionId: "sticky-gpu-0" });
+  models.setProvider(baseProvider);
+  await models.completeSimple(baseProvider.getModels()[0], { messages: userMsg, tools: toolDef }, { reasoning: "high" });
+  await models.completeSimple(baseProvider.getModels()[0], { messages: userMsg }, { reasoning: "high" });
+  await models.completeSimple(baseProvider.getModels()[0], { messages: userMsg }, { reasoning: "off" });
+
+  // 1. Stabilized tool-use profile
+  assert.equal(requests[0].temperature, 0.3);
+  assert.equal(requests[0].top_p, 0.5);
+  assert.equal(requests[0].top_k, 65536);
+  assert.equal(requests[0].alpha_presence, 0.5);
+  assert.equal(requests[0].alpha_frequency, 0.1);
+  assert.equal(requests[0].alpha_decay, 0.996);
+  assert.equal(requests[0].session_id, undefined);
+  assert.equal(headers[0]["x-rwkv-session-id"], "sticky-gpu-0");
+
+  // 2. Non-tool Open Think & Fake Think profiles remain unchanged
+  assert.equal(requests[1].temperature, 0.96);
+  assert.equal(requests[1].top_p, 0.76);
+  assert.equal(requests[1].top_k, 32);
+  assert.equal(requests[1].alpha_presence, 1);
+  assert.equal(requests[1].alpha_frequency, 0.1);
+  assert.equal(requests[1].alpha_decay, 0.988);
+
+  assert.equal(requests[2].temperature, 1.0);
+  assert.equal(requests[2].top_p, 0.28);
+  assert.equal(requests[2].top_k, 32);
+  assert.equal(requests[2].alpha_presence, 0);
+  assert.equal(requests[2].alpha_frequency, 0);
+  assert.equal(requests[2].alpha_decay, 0.996);
+
+  // 3. Env sampling overrides apply, while explicit temperature: 0 still wins
+  const envCfg = readConfig({
+    RWKV_BASE_URL: config.baseUrl,
+    RWKV_TEMPERATURE: "0.4",
+    RWKV_TOP_P: "0.6",
+    RWKV_TOP_K: "128",
+    RWKV_ALPHA_PRESENCE: "0.8",
+    RWKV_ALPHA_FREQUENCY: "0.2",
+    RWKV_ALPHA_DECAY: "0.99",
+  });
+  const envModels = createModels();
+  const envProvider = createRwkvProvider(envCfg);
+  envModels.setProvider(envProvider);
+  await envModels.completeSimple(envProvider.getModels()[0], { messages: userMsg, tools: toolDef }, { reasoning: "high" });
+  await envModels.completeSimple(envProvider.getModels()[0], { messages: userMsg, tools: toolDef }, { reasoning: "high", temperature: 0 });
+
+  assert.equal(requests[3].temperature, 0.4);
+  assert.equal(requests[3].top_p, 0.6);
+  assert.equal(requests[3].top_k, 128);
+  assert.equal(requests[3].alpha_presence, 0.8);
+  assert.equal(requests[3].alpha_frequency, 0.2);
+  assert.equal(requests[3].alpha_decay, 0.99);
+
+  assert.equal(requests[4].temperature, 1);
+  assert.equal(requests[4].top_k, 1);
+  assert.equal(requests[4].top_p, 1);
 });

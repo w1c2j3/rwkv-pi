@@ -2,6 +2,15 @@ import type { RwkvConfig } from "./config.js";
 import { promptForRequest, STOP_TEXTS } from "./prompt.js";
 import { ContinuationParser } from "./xml.js";
 
+function mergeHeader(headers: HeadersInit | undefined, name: string, value: string): Record<string, string> {
+  const out: Record<string, string> = {};
+  if (headers instanceof Headers) headers.forEach((v, k) => { out[k] = v; });
+  else if (Array.isArray(headers)) for (const [k, v] of headers) out[k] = v;
+  else if (headers) Object.assign(out, headers);
+  out[name] = value;
+  return out;
+}
+
 export async function countPrompt(prompt: string, config: RwkvConfig, fetcher: typeof fetch, signal?: AbortSignal | null): Promise<number> {
   const response = await fetcher(config.baseUrl + "/tokens/count", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ text: prompt }), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000) });
   if (!response.ok) throw new Error(`Lightning tokenizer returned HTTP ${response.status}.`);
@@ -27,21 +36,34 @@ export function lightningFetch(config: RwkvConfig, fetcher: typeof fetch): typeo
       // A raw continuation must hand control back before a generated User turn.
       // This server includes matched text stops; the client removes that suffix.
       stop: STOP_TEXTS, force_reasoning: false, chunk_size: 2, metrics: true,
-      // Preserve the base artifact's Tools / Open Think / Fake Think profiles.
-      temperature: hasTools || thinking ? 0.96 : 1.0, top_p: hasTools || thinking ? 0.76 : 0.28, top_k: 32,
-      alpha_presence: !hasTools && thinking ? 1 : 0,
-      alpha_frequency: !hasTools && thinking ? 0.1 : 0,
-      alpha_decay: !hasTools && thinking ? 0.988 : 0.996,
+      // Stabilized tool-calling profile (terminus2 / RWKV-Agent) prevents JSON syntax drift
+      // and zero-penalty RNN repetition loops; non-tool turns keep Open Think / Fake Think.
+      temperature: hasTools ? 0.3 : thinking ? 0.96 : 1.0,
+      top_p: hasTools ? 0.5 : thinking ? 0.76 : 0.28,
+      top_k: hasTools ? 65536 : 32,
+      alpha_presence: hasTools ? 0.5 : thinking ? 1 : 0,
+      alpha_frequency: hasTools ? 0.1 : thinking ? 0.1 : 0,
+      alpha_decay: hasTools ? 0.996 : thinking ? 0.988 : 0.996,
     };
+    if (config.sampling) {
+      const s = config.sampling;
+      if (s.temperature !== undefined) wire.temperature = s.temperature;
+      if (s.topP !== undefined) wire.top_p = s.topP;
+      if (s.topK !== undefined) wire.top_k = s.topK;
+      if (s.alphaPresence !== undefined) wire.alpha_presence = s.alphaPresence;
+      if (s.alphaFrequency !== undefined) wire.alpha_frequency = s.alphaFrequency;
+      if (s.alphaDecay !== undefined) wire.alpha_decay = s.alphaDecay;
+    }
     for (const key of ["temperature", "top_p", "top_k", "alpha_presence", "alpha_frequency", "alpha_decay", "adapter_id", "adapter_version", "adapter_scale", "state_id"]) if (chat[key] !== undefined) wire[key] = chat[key];
     // OpenAI-style temperature zero means greedy; native Lightning requires > 0.
     if (wire.temperature === 0) { wire.temperature = 1; wire.top_k = 1; wire.top_p = 1; }
     const controller = new AbortController();
     const signal = init.signal ? AbortSignal.any([init.signal, controller.signal]) : controller.signal;
+    const headers = config.sessionId ? mergeHeader(init.headers, "X-RWKV-Session-Id", config.sessionId) : init.headers;
     // The pinned batch route enables the engine's native prefix cache, including
     // for one prompt. Send full history: the engine restores a matching snapshot
     // and prefills only its token suffix. Chat's compatibility route bypasses it.
-    const response = await fetcher(config.baseUrl + "/batch/completions", { ...init, body: JSON.stringify(wire), signal });
+    const response = await fetcher(config.baseUrl + "/batch/completions", { ...init, headers, body: JSON.stringify(wire), signal });
     if (!response.ok || !response.body) return response;
     const parser = new ContinuationParser(thinking, chat.tools ?? [], chat.tool_choice ?? "auto", format, config.toolCallRecovery);
     let requestId: string | undefined, finished = false, stopSent = false;
@@ -52,7 +74,7 @@ export function lightningFetch(config: RwkvConfig, fetcher: typeof fetch): typeo
       // Never issue the server's global stop; cancel this request ID only.
       if (requestId && !finished && !stopSent) {
         stopSent = true;
-        await fetcher(config.baseUrl + "/server/stop", { method: "POST", headers: init?.headers, body: JSON.stringify({ request_id: requestId }), signal: AbortSignal.timeout(5000) }).catch(() => {});
+        await fetcher(config.baseUrl + "/server/stop", { method: "POST", headers, body: JSON.stringify({ request_id: requestId }), signal: AbortSignal.timeout(5000) }).catch(() => {});
       }
     }
     const body = new ReadableStream<Uint8Array>({

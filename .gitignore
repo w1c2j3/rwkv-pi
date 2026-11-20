@@ -67,6 +67,8 @@
 !/src/environment.ts
 !/src/epoch.ts
 !/src/extension.ts
+!/src/harbor-cli.ts
+!/src/harbor.ts
 !/src/harness-cli.ts
 !/src/harness.ts
 !/src/lightning.ts
@@ -109,6 +111,7 @@
 !/test/doctor.test.mjs
 !/test/deepseek-teacher.test.mjs
 !/test/epoch.test.mjs
+!/test/harbor.test.mjs
 !/test/harness.test.mjs
 !/test/helpers/mock-server.mjs
 !/test/integration.test.mjs

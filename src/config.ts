@@ -2,6 +2,15 @@ import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { join, resolve } from "node:path";
 
+export interface RwkvSamplingConfig {
+  temperature?: number;
+  topP?: number;
+  topK?: number;
+  alphaPresence?: number;
+  alphaFrequency?: number;
+  alphaDecay?: number;
+}
+
 export interface RwkvConfig {
   backend: "lightning" | "openai";
   baseUrl: string;
@@ -28,6 +37,9 @@ export interface RwkvConfig {
   worklistBudgetTokens: number;
   worklistKeepRecentPairs: number;
   worklistFoldTriggerTokens: number;
+  sampling?: RwkvSamplingConfig;
+  /** Sticky session affinity header (`X-RWKV-Session-Id`) for RWKV_Lightning_CUDA_router prefix caching. */
+  sessionId?: string;
   adapterId?: string;
   adapterVersion?: string;
   adapterScale?: number;
@@ -58,6 +70,37 @@ export function envInteger(env: NodeJS.ProcessEnv, name: string, fallback: numbe
     throw new Error(`${name} must be ${min === 0 ? "0 (disabled) or " : ""}a positive integer.`);
   }
   return value;
+}
+
+function optionalEnvFloat(
+  env: NodeJS.ProcessEnv,
+  name: string,
+  valid: (value: number) => boolean,
+  requirement: string,
+): number | undefined {
+  const raw = env[name]?.trim();
+  if (!raw) return undefined;
+  const value = Number(raw);
+  if (!Number.isFinite(value) || !valid(value)) throw new Error(`${name} ${requirement}`);
+  return value;
+}
+
+export function readSamplingConfig(env: NodeJS.ProcessEnv = process.env): RwkvSamplingConfig | undefined {
+  const temperature = optionalEnvFloat(env, "RWKV_TEMPERATURE", (v) => v >= 0, "must be a finite number >= 0.");
+  const topP = optionalEnvFloat(env, "RWKV_TOP_P", (v) => v > 0 && v <= 1, "must be in (0, 1].");
+  const topK = env.RWKV_TOP_K?.trim() ? envInteger(env, "RWKV_TOP_K", 1, 1) : undefined;
+  const alphaPresence = optionalEnvFloat(env, "RWKV_ALPHA_PRESENCE", (v) => v >= 0, "must be a finite number >= 0.");
+  const alphaFrequency = optionalEnvFloat(env, "RWKV_ALPHA_FREQUENCY", (v) => v >= 0, "must be a finite number >= 0.");
+  const alphaDecay = optionalEnvFloat(env, "RWKV_ALPHA_DECAY", (v) => v > 0 && v <= 1, "must be in (0, 1].");
+  const sampling: RwkvSamplingConfig = {
+    ...(temperature !== undefined ? { temperature } : {}),
+    ...(topP !== undefined ? { topP } : {}),
+    ...(topK !== undefined ? { topK } : {}),
+    ...(alphaPresence !== undefined ? { alphaPresence } : {}),
+    ...(alphaFrequency !== undefined ? { alphaFrequency } : {}),
+    ...(alphaDecay !== undefined ? { alphaDecay } : {}),
+  };
+  return Object.keys(sampling).length > 0 ? sampling : undefined;
 }
 
 export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
@@ -105,6 +148,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
   if (maxTokens >= contextWindow) {
     throw new Error("RWKV_MAX_TOKENS must be smaller than RWKV_CONTEXT_WINDOW to leave room for the prompt.");
   }
+  const sampling = readSamplingConfig(env);
+  const sessionId = env.RWKV_SESSION_ID?.trim() || undefined;
+  if (sessionId && /[\r\n\0]/.test(sessionId)) throw new Error("RWKV_SESSION_ID must not contain control characters.");
   const adapterId = env.RWKV_ADAPTER_ID?.trim() || undefined;
   const adapterVersion = env.RWKV_ADAPTER_VERSION?.trim() || undefined;
   const adapterScale = env.RWKV_ADAPTER_SCALE?.trim() ? Number(env.RWKV_ADAPTER_SCALE) : undefined;
@@ -130,6 +176,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
     worklistBudgetTokens,
     worklistKeepRecentPairs,
     worklistFoldTriggerTokens,
+    ...(sampling ? { sampling } : {}),
+    ...(sessionId ? { sessionId } : {}),
     ...(adapterId ? { adapterId } : {}),
     ...(adapterVersion ? { adapterVersion } : {}),
     ...(adapterScale !== undefined ? { adapterScale } : {}),
