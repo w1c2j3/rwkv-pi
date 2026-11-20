@@ -1,14 +1,14 @@
 import { object } from "./tasks.js";
 import { estimateRwkvTokens } from "./worklist.js";
 
-export const DEFAULT_EPOCH_BUDGET_TOKENS = 16384;
-export const DEFAULT_EPOCH_HARD_SLACK_TOKENS = 4096;
-export const DEFAULT_EPOCH_BACKBONE_MAX_TOKENS = 6144;
-export const DEFAULT_EPOCH_KEEP_RECENT_PAIRS = 3;
-export const DEFAULT_EPOCH_MAX_RESULT_TOKENS = 4000;
+export const DEFAULT_EPOCH_BUDGET_TOKENS = 9600;
+export const DEFAULT_EPOCH_HARD_SLACK_TOKENS = 2400;
+export const DEFAULT_EPOCH_BACKBONE_MAX_TOKENS = 3600;
+export const DEFAULT_EPOCH_KEEP_RECENT_PAIRS = 2;
+export const DEFAULT_EPOCH_MAX_RESULT_TOKENS = 2000;
 
-const MAX_PINNED_UNEDITED_READ_TOKENS = 2400;
-const MAX_PRIOR_TURN_LAST_RESULT_CHARS = 1800;
+const MAX_PINNED_UNEDITED_READ_TOKENS = 1800;
+const MAX_PRIOR_TURN_LAST_RESULT_CHARS = 1600;
 
 const READ_NAMES = new Set(["read", "read_file"]);
 const SEARCH_NAMES = new Set(["grep", "find", "ls"]);
@@ -103,7 +103,7 @@ function slimOversizedToolMessage(
   const headChars = Math.floor(maxChars * 0.75);
   const tailChars = maxChars - headChars;
   const omitted = raw.length - maxChars;
-  const slimmed = `${raw.slice(0, headChars)}\n\n[... ${omitted} characters omitted to preserve 16k context window; use read with offset/limit or grep for specific lines ...]\n\n${raw.slice(raw.length - tailChars)}`;
+  const slimmed = `${raw.slice(0, headChars)}\n\n[... ${omitted} characters omitted to preserve context sweet spot; use read with offset/limit or grep for specific lines ...]\n\n${raw.slice(raw.length - tailChars)}`;
   return { ...msg, content: slimmed };
 }
 
@@ -183,6 +183,8 @@ export function buildOpenAIEpochStateLedger(
   const succeededKeys = new Set<string>();
   const inspected: string[] = [];
   const inspectedSeen = new Set<string>();
+  const subagentSummaries: string[] = [];
+  const webSummaries: string[] = [];
   const failed: string[] = [];
   let latestBash: string | undefined;
   let bashRuns = 0;
@@ -198,7 +200,8 @@ export function buildOpenAIEpochStateLedger(
 
       if (call.name === "bash") {
         bashRuns++;
-        const cmd = cleanOneLine(String(call.args.command ?? ""), 80);
+        const rawCmd = String(call.args.command ?? "");
+        const cmd = cleanOneLine(rawCmd, 80);
         const exitMatch = /(?:exit code[:\s]+|exited with code )(\d+)/i.exec(resText);
         const exitCode = exitMatch ? exitMatch[1]! : (callFailed ? "1" : "0");
         const bodyLines = resText
@@ -207,6 +210,35 @@ export function buildOpenAIEpochStateLedger(
           .filter((l) => l !== "" && !/^(?:\[?exit code|Command exited with code)/i.test(l));
         const tailSummary = bodyLines.length > 0 ? ` (${cleanOneLine(bodyLines[bodyLines.length - 1]!, 80)})` : "";
         latestBash = `${cmd} -> exit ${exitCode}${tailSummary}`;
+        if (!callFailed) {
+          const catMatches = rawCmd.matchAll(/(?:^|[;&|]\s*|\s)(?:cat|sed\s+-n\s+['"][^'"]+['"]|head(?:\s+-\d+|\s+-n\s*\d+)?|tail(?:\s+-\d+|\s+-n\s*\d+)?)\s+([^\s;&|'"]+)/g);
+          for (const m of catMatches) {
+            const targetFile = m[1]?.trim().replace(/^\.\//, "");
+            if (targetFile && !targetFile.startsWith("-") && /[.\w/]/.test(targetFile)) {
+              const entry = `bash-read ${targetFile}`;
+              if (!inspectedSeen.has(entry)) {
+                inspectedSeen.add(entry);
+                inspected.push(entry);
+              }
+            }
+          }
+        }
+      }
+
+      if (call.name.startsWith("subagent_")) {
+        if (call.name === "subagent_wait") {
+          subagentSummaries.push("subagent_wait (child finished; main workspace read/write/edit/bash unlocked — do NOT call subagent_plan/subagent_start again in this turn)");
+        } else {
+          subagentSummaries.push(`${call.name} (${callFailed ? "failed" : "ok"})`);
+        }
+        continue;
+      }
+
+      if (call.name === "web_search" || call.name === "web_fetch") {
+        const q = cleanOneLine(String(call.args.query ?? call.args.url ?? ""), 72);
+        const page = typeof call.args.offset === "number" && call.args.offset > 0 ? ` @${call.args.offset}` : "";
+        webSummaries.push(`${call.name} ${JSON.stringify(q)}${page} (${callFailed ? "failed" : "ok"})`);
+        continue;
       }
 
       if (callFailed) {
@@ -268,6 +300,12 @@ export function buildOpenAIEpochStateLedger(
   }
   if (latestBash !== undefined) {
     sections.push(`- Latest command (${bashRuns} run): ${latestBash}`);
+  }
+  if (subagentSummaries.length > 0) {
+    sections.push(`- Subagents: ${subagentSummaries.slice(-6).join("; ")}`);
+  }
+  if (webSummaries.length > 0) {
+    sections.push(`- Web queries: ${webSummaries.slice(-6).join("; ")}`);
   }
   if (unresolvedFailed.length > 0) {
     sections.push(`- Failed attempts (do not repeat verbatim): ${unresolvedFailed.slice(-5).join("; ")}`);

@@ -67,10 +67,46 @@ class TestExport(unittest.TestCase):
             self.assertIn('schema_version = "1.4"', (task / "task.toml").read_text())
             with self.assertRaises(FileExistsError):
                 harbor_export.export(bundle.load(_bundle_file(root)), root / "out")
+            self.assertNotIn("golang", (task / "environment/Dockerfile").read_text())
+            self.assertNotIn("task-setup", (task / "environment/Dockerfile").read_text())
             fast = harbor_export.export(bundle.load(_bundle_file(root)), root / "out-fast",
                                         base_image="rwkv-pi-harbor-base:1.5.0")
             self.assertIn("FROM rwkv-pi-harbor-base:1.5.0\n", (fast / "environment/Dockerfile").read_text())
             self.assertNotIn("apt-get", (fast / "environment/Dockerfile").read_text())
+
+    def test_shebang_files_are_executable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = _bundle_file(root)
+            raw = json.loads(path.read_text())
+            raw["task"]["files"]["app/tests/run.sh"] = "#!/bin/sh\nexit 0\n"
+            path.write_text(json.dumps(raw, ensure_ascii=False))
+            ws = harbor_export.export(bundle.load(path), root / "out") / "environment/workspace/app"
+            self.assertTrue((ws / "tests/run.sh").stat().st_mode & 0o111)
+            self.assertFalse((ws / "main.py").stat().st_mode & 0o111)
+
+    def test_toolchains_and_setup_script(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = _bundle_file(root)
+            raw = json.loads(path.read_text())
+            raw["task"]["toolchains"] = ["rust", "go"]
+            raw["task"]["files"][".task-setup.sh"] = "git init -q\n"
+            path.write_text(json.dumps(raw, ensure_ascii=False))
+            text = harbor_export.dockerfile(bundle.load(path))
+            self.assertLess(text.index("golang-go"), text.index("rustc cargo"))
+            self.assertLess(text.index("rustc cargo"), text.index("COPY workspace/"))
+            self.assertTrue(text.endswith("COPY workspace/ /app/\nRUN bash .task-setup.sh && rm -f .task-setup.sh\n"))
+            raw["task"]["toolchains"] = ["web"]
+            path.write_text(json.dumps(raw, ensure_ascii=False))
+            text = harbor_export.dockerfile(bundle.load(path))
+            self.assertIn("react@18.3.1", text)
+            self.assertLess(text.index("ARG NPM_REGISTRY"), text.index("/opt/web"))
+            self.assertIn("COPY workspace/ /app/\nRUN ln -s /opt/web/node_modules /app/node_modules\n", text)
+            raw["task"]["toolchains"] = ["cobol"]
+            path.write_text(json.dumps(raw, ensure_ascii=False))
+            with self.assertRaises(ValueError):
+                harbor_export.dockerfile(bundle.load(path))
 
 
 def _step(i, calls=(), message="", errors=()):

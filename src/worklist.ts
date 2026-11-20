@@ -42,14 +42,15 @@ export const WORKLIST_CHECKPOINT_NUDGE =
 export const WORKLIST_INIT_NUDGE =
   "Context budget reached while exploring this task. If multi-step work remains, call `todo_plan` to list the remaining steps (then checkpoint verified paths and findings with `todo_update`); if only 1-2 quick steps or the final answer remain, finish directly without `todo_plan`.";
 
-export const DEFAULT_WORKLIST_BUDGET_TOKENS = 16384;
-export const DEFAULT_WORKLIST_HARD_SLACK_TOKENS = 4096;
-export const DEFAULT_BACKBONE_MAX_TOKENS = 6144;
+export const DEFAULT_WORKLIST_BUDGET_TOKENS = 9600;
+export const DEFAULT_WORKLIST_HARD_SLACK_TOKENS = 2400;
+export const DEFAULT_BACKBONE_MAX_TOKENS = 3600;
 export const DEFAULT_KEEP_RECENT_PAIRS = 2;
-export const DEFAULT_FOLD_TRIGGER_TOKENS = 12288;
+export const DEFAULT_FOLD_TRIGGER_TOKENS = 6144;
+export const DEFAULT_WORKLIST_MAX_RESULT_TOKENS = 2000;
 export const MAX_WORKLIST_NOTE_CHARS = 600;
 
-const MAX_SECOND_RECENT_PAIR_TOKENS = 2800;
+const MAX_SECOND_RECENT_PAIR_TOKENS = 2200;
 const MAX_PINNED_UNEDITED_READ_TOKENS = 1800;
 const MAX_PRIOR_TURN_FALLBACK_RESULT_CHARS = 1600;
 const INIT_NUDGE_COOLDOWN_STEPS = 4;
@@ -212,16 +213,36 @@ export function formatWorklist(items: readonly WorklistItem[]): string {
   return lines.join("\n");
 }
 
-/** Calibrated RWKV World token estimator (ASCII/JSON ~3.4 chars/tok, CJK ~1.5 chars/tok); overrideable in tests. */
+/**
+ * Calibrated RWKV World token estimator aligned with rwkv_vocab_v20230424
+ * (CJK/fullwidth ~1.04 chars/tok, ASCII punctuation/digits ~2.0 chars/tok,
+ * ASCII identifiers ~4.0 chars/tok); overrideable in tests.
+ */
 export function estimateRwkvTokens(text: string): number {
   if (!text) return 0;
   let weight = 0;
+  let spaceRun = 0;
   for (let i = 0; i < text.length; i++) {
     const code = text.charCodeAt(i);
-    if (code >= 0x4e00 && code <= 0x9fff) weight += 0.68;
-    else if (code === 10 || code === 9) weight += 0.45;
-    else if (code < 0x80) weight += 0.29;
-    else weight += 0.55;
+    if (code === 32) {
+      spaceRun++;
+      weight += spaceRun > 1 ? 0.22 : 0.26;
+      continue;
+    }
+    spaceRun = 0;
+    if ((code >= 0x4e00 && code <= 0x9fff) || (code >= 0x3000 && code <= 0x303f) || (code >= 0xff00 && code <= 0xffef)) {
+      weight += 0.96;
+    } else if (code === 10 || code === 9) {
+      weight += 0.55;
+    } else if (code >= 48 && code <= 57) {
+      weight += 0.50;
+    } else if ((code >= 65 && code <= 90) || (code >= 97 && code <= 122)) {
+      weight += 0.25;
+    } else if (code < 0x80) {
+      weight += 0.50;
+    } else {
+      weight += 0.85;
+    }
   }
   return Math.max(1, Math.ceil(weight));
 }
@@ -302,7 +323,28 @@ function isNotedUpdateEntry(call: ToolCallEntry, ok: boolean): boolean {
   return typeof note === "string" && sanitizeWorklistField(note) !== "";
 }
 
-function parseTurnGroups(slice: readonly OpenAIMessage[]): TurnGroup[] {
+function slimOversizedToolMessage(
+  msg: OpenAIMessage,
+  maxResultTokens: number,
+  count: (text: string) => number,
+): OpenAIMessage {
+  if (msg.role !== "tool" || maxResultTokens <= 0) return msg;
+  const raw = messageText(msg.content);
+  if (!raw || count(raw) <= maxResultTokens) return msg;
+  const maxChars = Math.max(1200, Math.floor(maxResultTokens * 3.1));
+  if (raw.length <= maxChars) return msg;
+  const headChars = Math.floor(maxChars * 0.75);
+  const tailChars = maxChars - headChars;
+  const omitted = raw.length - maxChars;
+  const slimmed = `${raw.slice(0, headChars)}\n\n[... ${omitted} characters omitted to preserve context sweet spot; use read with offset/limit or grep for specific lines ...]\n\n${raw.slice(raw.length - tailChars)}`;
+  return { ...msg, content: slimmed };
+}
+
+function parseTurnGroups(
+  slice: readonly OpenAIMessage[],
+  maxResultTokens = DEFAULT_WORKLIST_MAX_RESULT_TOKENS,
+  count: (text: string) => number = estimateRwkvTokens,
+): TurnGroup[] {
   const groups: TurnGroup[] = [];
   let i = 0;
   while (i < slice.length) {
@@ -314,10 +356,11 @@ function parseTurnGroups(slice: readonly OpenAIMessage[]): TurnGroup[] {
       let j = i + 1;
       let allOk = true;
       while (j < slice.length && slice[j]!.role === "tool") {
-        const toolMsg = slice[j]!;
+        const rawTool = slice[j]!;
+        const toolMsg = slimOversizedToolMessage(rawTool, maxResultTokens, count);
         groupMsgs.push(toolMsg);
-        if (typeof toolMsg.tool_call_id === "string") pending.delete(toolMsg.tool_call_id);
-        if (toolMsg.isError === true || isErrorResultText(messageText(toolMsg.content))) allOk = false;
+        if (typeof rawTool.tool_call_id === "string") pending.delete(rawTool.tool_call_id);
+        if (rawTool.isError === true || isErrorResultText(messageText(rawTool.content))) allOk = false;
         j++;
         if (pending.size === 0 && (j >= slice.length || slice[j]!.role !== "tool")) break;
       }
@@ -400,8 +443,12 @@ function compactPriorToolGroup(group: TurnGroup): OpenAIMessage[] {
   });
 }
 
-function foldCompletedOpenAITurn(slice: readonly OpenAIMessage[]): OpenAIMessage[] {
-  const groups = parseTurnGroups(slice);
+function foldCompletedOpenAITurn(
+  slice: readonly OpenAIMessage[],
+  maxResultTokens = DEFAULT_WORKLIST_MAX_RESULT_TOKENS,
+  count: (text: string) => number = estimateRwkvTokens,
+): OpenAIMessage[] {
+  const groups = parseTurnGroups(slice, maxResultTokens, count);
   const toolGroups = groups.filter((g) => g.kind === "tool_group");
   const lastWorklist = [...toolGroups].reverse().find((g) => g.ok && g.isWorklist);
   const fallbackWs = lastWorklist === undefined
@@ -475,6 +522,7 @@ export interface FoldOpenAIWorklistOptions {
   readonly backboneMaxTokens?: number;
   readonly keepRecentPairs?: number;
   readonly foldTriggerTokens?: number;
+  readonly maxResultTokens?: number;
   readonly keepInitialPlan?: boolean;
   readonly systemGuidance?: boolean;
   readonly countTokens?: (text: string) => number;
@@ -506,6 +554,7 @@ export function foldWorklistRequest(
   const backboneMaxTokens = options.backboneMaxTokens ?? DEFAULT_BACKBONE_MAX_TOKENS;
   const keepRecentPairs = Math.max(0, options.keepRecentPairs ?? DEFAULT_KEEP_RECENT_PAIRS);
   const foldTriggerTokens = Math.max(0, options.foldTriggerTokens ?? DEFAULT_FOLD_TRIGGER_TOKENS);
+  const maxResultTokens = options.maxResultTokens ?? DEFAULT_WORKLIST_MAX_RESULT_TOKENS;
   const keepInitialPlan = options.keepInitialPlan !== false;
 
   const hasTodoPlanTool = rawTools.some((t) => {
@@ -548,7 +597,7 @@ export function foldWorklistRequest(
   for (let t = 0; t < userIndices.length - 1; t++) {
     const from = t === 0 ? 0 : userIndices[t]!;
     const to = userIndices[t + 1]!;
-    priorTurns.push(foldCompletedOpenAITurn(conversation.slice(from, to)));
+    priorTurns.push(foldCompletedOpenAITurn(conversation.slice(from, to), maxResultTokens, count));
   }
   const turnTokens = (msgs: readonly OpenAIMessage[]) => msgs.reduce((s, m) => s + count(renderSingleMessageEstimate(m)), 0);
   let priorTokens = priorTurns.reduce((s, turn) => s + turnTokens(turn), 0);
@@ -559,7 +608,7 @@ export function foldWorklistRequest(
   const priorFlat = priorTurns.flat();
 
   const activeStart = userIndices.length === 1 ? 0 : userIndices[userIndices.length - 1]!;
-  const activeGroups = parseTurnGroups(conversation.slice(activeStart));
+  const activeGroups = parseTurnGroups(conversation.slice(activeStart), maxResultTokens, count);
   const toolGroups = activeGroups.filter((g) => g.kind === "tool_group");
 
   const fullGroupTokens = new Map<TurnGroup, number>();

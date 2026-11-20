@@ -42,7 +42,12 @@ def _models_json_script(base_url: str) -> str:
         "contextWindow": 131072,
         "maxTokens": 16384,
         "cost": {"input": 0, "output": 0, "cacheRead": 0, "cacheWrite": 0},
-        "samplingParams": {"thinking": {"type": "enabled"}, "reasoning_effort": "high", "parallel_tool_calls": False},
+        "samplingParams": {
+            "thinking": {"type": "enabled"},
+            "chat_template_kwargs": {"enable_thinking": True},
+            "reasoning_effort": "high",
+            "parallel_tool_calls": False,
+        },
         "compat": {
             "supportsStore": False,
             "supportsDeveloperRole": False,

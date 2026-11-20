@@ -67,8 +67,15 @@ process.stdout.write(JSON.stringify(out))`;
 // ---------------------------------------------------------------------------------------------
 // Paths
 
-const components = (path: string) => path.replace(/^@/, "").split("/").filter((part) => part && part !== ".");
-const resolveIn = (cwd: string, path: string) => posix.resolve(cwd, path.replace(/^@/, ""));
+const normalizeWorkspaceAlias = (cwd: string, rawPath: string): string => {
+  const cleaned = rawPath.replace(/^@/, "");
+  if (cwd !== "/workspace" && (cleaned === "/workspace" || cleaned.startsWith("/workspace/"))) {
+    return cwd + cleaned.slice("/workspace".length);
+  }
+  return cleaned;
+};
+const components = (path: string, cwd = "/workspace") => normalizeWorkspaceAlias(cwd, path).split("/").filter((part) => part && part !== ".");
+const resolveIn = (cwd: string, path: string) => posix.resolve(cwd, normalizeWorkspaceAlias(cwd, path));
 
 /** Drop an immediately repeated run of components: inputs/src/inputs/src/app.py -> inputs/src/app.py. */
 export function collapseRepeats(parts: readonly string[]): string[] {

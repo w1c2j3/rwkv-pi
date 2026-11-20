@@ -23,6 +23,7 @@ import json
 import shutil
 from pathlib import Path
 
+from . import bundle as bundle_mod
 from . import faults as faults_mod
 from . import test_turn
 from .bundle import Bundle
@@ -168,6 +169,40 @@ def _checks(bundle: Bundle, commands: list[str] | None, fault_record: str | None
     return spec
 
 
+# Extra Ubuntu 24.04 packages per declared toolchain (bundle task.toolchains); each is its own cached layer.
+TOOLCHAINS = {"go": "golang-go", "rust": "rustc cargo", "java": "openjdk-17-jdk-headless"}
+# "web": pinned React/TypeScript packages for TSX/JSX projects, installed once in /opt/web and linked as
+# /app/node_modules (the container has no registry access at run time).
+WEB_PACKAGES = ("@types/node@22.9.0", "@types/react@18.3.12", "@types/react-dom@18.3.1", "jsdom@25.0.1",
+                "react@18.3.1", "react-dom@18.3.1", "tsx@4.19.2", "typescript@5.6.3")
+# A bundle may ship this script to build state that plain files cannot carry (e.g. git history); it runs once at
+# image build time in /app and is removed, so the agent never sees it.
+SETUP_SCRIPT = ".task-setup.sh"
+
+
+def dockerfile(bundle: Bundle, base_image: str | None = None) -> str:
+    unknown = set(bundle.toolchains) - set(TOOLCHAINS) - {"web"}
+    if unknown:
+        raise ValueError(f"{bundle.id}: unknown toolchains {sorted(unknown)}")
+    base = task_dockerfile(base_image)
+    head, copy = base.split("WORKDIR /app\n")
+    if base_image and "web" in bundle.toolchains and "ARG NPM_REGISTRY" not in head:
+        head += "ARG NPM_REGISTRY=https://registry.npmmirror.com\n"
+    extra = "".join(
+        "RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && apt-get -o Acquire::http::Proxy=false update \\\n"
+        f"    && apt-get -o Acquire::http::Proxy=false install -y --no-install-recommends {TOOLCHAINS[t]} \\\n"
+        "    && rm -rf /var/lib/apt/lists/*\n" for t in sorted(set(bundle.toolchains) - {"web"}))
+    link = ""
+    if "web" in bundle.toolchains:
+        extra += ("RUN unset http_proxy https_proxy HTTP_PROXY HTTPS_PROXY && mkdir -p /opt/web && cd /opt/web \\\n"
+                  "    && echo '{\"private\":true}' > package.json && npm install --no-audit --no-fund --save-exact --ignore-scripts "
+                  f'--registry "$NPM_REGISTRY" {" ".join(WEB_PACKAGES)}\n')
+        link = "RUN ln -s /opt/web/node_modules /app/node_modules\n"
+    # rm -f: the script may delete itself
+    setup = f"RUN bash {SETUP_SCRIPT} && rm -f {SETUP_SCRIPT}\n" if SETUP_SCRIPT in bundle.files else ""
+    return head + extra + "WORKDIR /app\n" + copy + link + setup
+
+
 def task_dockerfile(base_image: str | None = None) -> str:
     """Task Dockerfile: either the full standalone recipe or a fast layer on top of a prebuilt base image."""
     if not base_image:
@@ -190,11 +225,12 @@ def export(bundle: Bundle, out_root: Path, *, faults: dict | None = None, base_i
     """
     commands = test_turn.detect_commands(bundle.files)
     killed = [k for k in (faults or {}).get("killed") or [] if "__main__" not in k["old"]]
+    # Understand/ops bundles may ship no runnable tests: then the bundle's own turns are the whole task.
     final_turn = (test_turn.debug_instruction(bundle.id, commands) if killed
-                  else test_turn.instruction(bundle.id, commands))
-    turns = [*bundle.turns, final_turn]
+                  else test_turn.instruction(bundle.id, commands) if commands else None)
+    turns = [*bundle.turns, *([final_turn] if final_turn else [])]
     fault_meta = {
-        "final_turn": "debug" if killed else "test",
+        "final_turn": "debug" if killed else "test" if commands else "none",
         "fault_candidates": len(killed),
         "fault_baseline_pass": bool((faults or {}).get("baseline_pass")),
         "fault_tried": int((faults or {}).get("tried") or 0),
@@ -208,11 +244,8 @@ def export(bundle: Bundle, out_root: Path, *, faults: dict | None = None, base_i
     tmp = out_root / f".{bundle.id}.partial"
     shutil.rmtree(tmp, ignore_errors=True)
     workspace = tmp / "environment" / "workspace"
-    for rel, text in bundle.files.items():
-        target = workspace / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
-    (tmp / "environment" / "Dockerfile").write_text(task_dockerfile(base_image))
+    bundle_mod.write_workspace(workspace, bundle.files)
+    (tmp / "environment" / "Dockerfile").write_text(dockerfile(bundle, base_image=base_image))
     (tmp / "environment" / "docker-compose.yaml").write_text(COMPOSE_OVERRIDE)
 
     source_sha = hashlib.sha256(bundle.source_path.read_bytes()).hexdigest()

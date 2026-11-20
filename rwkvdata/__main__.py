@@ -107,13 +107,13 @@ def cmd_finalize(args) -> None:
     rows = []
     tasks_dir = Path(args.tasks) if getattr(args, "tasks", None) else None
     for trial in map(Path, args.trials):
+        task_id = collect.trial_task(trial)
         if not collect._trial_complete(trial, tasks_dir):
-            rows.append({"trial": trial.name, "task_id": trial.name.split("__")[0], "status": "incomplete"})
+            rows.append({"trial": trial.name, "task_id": task_id, "status": "incomplete"})
             continue
         report = qc.evaluate(trial)
         (trial / "qc.json").write_text(qc.to_json(report))
-        task_id = trial.name.split("__")[0]
-        row = {"trial": trial.name, "task_id": task_id, "status": "ok", "verdict": report.verdict, "reasons": report.reasons,
+        row = {"trial": trial.name, "task": task_id, "task_id": task_id, "status": "ok", "verdict": report.verdict, "reasons": report.reasons,
                "effective_calls": report.effective_calls, "repairs": report.repair_iterations,
                "final_turn_repairs": report.final_turn_repairs, "tests_pass": report.final_tests_pass,
                "fault_injected": bool(report.fault and report.fault["injected"]),

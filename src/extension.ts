@@ -7,6 +7,7 @@ import { readConfig } from "./config.js";
 import { repeatedIdenticalCall, repeatedTargetFailure, repeatedWorklistSpin } from "./loop-guard.js";
 import { createRwkvProvider } from "./provider.js";
 import { hostFs, withTolerance } from "./tolerant-tools.js";
+import { createWebTools } from "./web-tools.js";
 import { createWorklistTools, isWorklistTool, PiWorklistState } from "./worklist.js";
 
 function selectsTool(name: string, argv: readonly string[] = process.argv, env: NodeJS.ProcessEnv = process.env): boolean {
@@ -23,7 +24,20 @@ export default function rwkvExtension(pi: ExtensionAPI): void {
   pi.registerProvider(createRwkvProvider(config));
   // The harness bash tool does not expose PI_* session variables, so its system prompt has no
   // guideline about them. Interactive pi must present the same tool.
-  if (process.env.RWKV_PI_PARITY?.trim() !== "0") pi.registerTool(createBashToolDefinition(process.cwd(), { exposeSessionEnvironment: false }) as never);
+  if (process.env.RWKV_PI_PARITY?.trim() !== "0") {
+    const cwd = process.cwd();
+    const bashDef = createBashToolDefinition(cwd, { exposeSessionEnvironment: false });
+    const wrappedBash = cwd !== "/workspace" ? {
+      ...bashDef,
+      async execute(callId: string, args: any, signal?: AbortSignal, onUpdate?: any, ctx?: any) {
+        const cmd = typeof args?.command === "string"
+          ? args.command.replace(/(?<![\w.-])\/workspace(?=\/|$|[\s"'`),;:])/g, cwd)
+          : args?.command;
+        return (bashDef as any).execute(callId, { ...args, command: cmd }, signal, onUpdate, ctx);
+      },
+    } : bashDef;
+    pi.registerTool(wrappedBash as never);
+  }
   // Same recall-tolerant execution as the harness. ls is registered only when selected so 4-tool
   // sessions never gain an extra tool in the prompt.
   if (config.toolTolerance) {
@@ -35,6 +49,13 @@ export default function rwkvExtension(pi: ExtensionAPI): void {
     ];
     for (const definition of definitions) {
       pi.registerTool(withTolerance(definition, process.cwd(), hostFs) as never);
+    }
+  }
+  const wantSearch = selectsTool("web_search");
+  const wantFetch = selectsTool("web_fetch");
+  if (wantSearch || wantFetch) {
+    for (const definition of createWebTools(process.env, { search: wantSearch, fetch: wantFetch })) {
+      pi.registerTool(definition as never);
     }
   }
   if (worklistState) {

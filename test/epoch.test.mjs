@@ -32,12 +32,15 @@ function callPair(id, name, args, resultText, reasoning = "") {
   ];
 }
 
-test("epoch mode: defaults to 16384 watermark and preserves 100% untouched baseline parity below watermark", () => {
-  assert.equal(DEFAULT_EPOCH_BUDGET_TOKENS, 16384);
+test("epoch mode: defaults to 9600 watermark and preserves 100% untouched baseline parity below watermark", () => {
+  assert.equal(DEFAULT_EPOCH_BUDGET_TOKENS, 9600);
   const cfg = readConfig({ RWKV_HISTORY_MODE: "epoch" });
   assert.equal(cfg.historyMode, "epoch");
-  assert.equal(cfg.epochBudgetTokens, 16384);
-  assert.equal(cfg.worklistBudgetTokens, 16384);
+  assert.equal(cfg.epochBudgetTokens, 9600);
+  assert.equal(cfg.epochKeepRecentPairs, 2);
+  assert.equal(cfg.epochMaxResultTokens, 2000);
+  assert.equal(cfg.worklistBudgetTokens, 9600);
+  assert.equal(cfg.worklistFoldTriggerTokens, 6144);
 
   const req = {
     model: "rwkv7",
@@ -68,7 +71,7 @@ test("epoch mode: folds older steps into deterministic State Ledger, pins unedit
     ...callPair("c7", "bash", { command: "node -v" }, "v22.22.1\nexit code: 0", "Node version."),
   ];
 
-  const epochOpts = { budgetTokens: 1500, keepRecentPairs: 1 };
+  const epochOpts = { budgetTokens: 1700, keepRecentPairs: 1 };
   const f1 = foldEpochRequest({ messages: baseMsgs, tools: piBaseTools }, epochOpts);
   assert.equal(f1.folded, true);
   assert.ok(f1.epochCount >= 1);

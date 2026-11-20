@@ -70,6 +70,8 @@ export function buildDataset(runs: RunRecord[], includeSmoke = false, approvedQu
     try {
       if (!run.steps.length || run.steps.at(-1)?.response?.stopReason !== "stop") throw new Error("Incomplete final answer.");
       for (const [index, step] of run.steps.entries()) {
+        const meta = step as { supervised?: boolean; excludedFromTraining?: string };
+        if (meta.supervised === false || meta.excludedFromTraining) continue;
         if (!step.response || !["stop", "toolUse"].includes(step.response.stopReason)) throw new Error("Incomplete generation.");
         const messages = [...step.request.messages, targetMessage(step.response)];
         validateMessages(messages, step.request.tools);
@@ -83,6 +85,7 @@ export function buildDataset(runs: RunRecord[], includeSmoke = false, approvedQu
           messages, tools: step.request.tools, loss: { scope: "last_assistant", messageIndex: messages.length - 1 },
         });
       }
+      if (!candidate.length) throw new Error("No supervised steps in run.");
     } catch (error) {
       rejected.push({ runId: run.runId, reason: error instanceof Error ? error.message : String(error) });
       continue;

@@ -27,11 +27,23 @@ class Bundle:
     checks: tuple[Check, ...]
     environment: str
     source_path: Path
+    toolchains: tuple[str, ...] = ()
 
     @property
     def turns(self) -> tuple[str, ...]:
         """User requests in order: the initial prompt, then each follow-up."""
         return (self.prompt, *self.followups)
+
+
+def write_workspace(root: Path, files: dict[str, str]) -> None:
+    """Materialize bundle files. Bundles carry text only, so a file starting with a shebang is made executable
+    (scripts that Makefiles and tests call as ./script must keep working in the task image)."""
+    for rel, text in files.items():
+        target = root / rel
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        if text.startswith("#!"):
+            target.chmod(0o755)
 
 
 def with_turns(b: Bundle, turns: list[str]) -> Bundle:
@@ -75,4 +87,5 @@ def load(path: str | Path) -> Bundle:
         checks=checks,
         environment=raw.get("review", {}).get("baseEnvironmentId") or task["family"],
         source_path=path,
+        toolchains=tuple(task.get("toolchains", ())),
     )

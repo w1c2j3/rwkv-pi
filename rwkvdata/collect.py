@@ -103,6 +103,14 @@ def job_costs(jobs_dir: Path) -> dict[str, float]:
     return {t.name: trial_cost_cny(t) for t in jobs_dir.glob("*/*") if (t / "steps").is_dir()}
 
 
+def trial_task(trial_dir: Path) -> str:
+    """Harbor truncates trial directory names to 32 characters; read task name from config.json when present."""
+    cfg = trial_dir / "config.json"
+    if cfg.is_file():
+        return Path(json.loads(cfg.read_text())["task"]["path"]).name
+    return trial_dir.name.split("__")[0]
+
+
 def _trial_reached_step1(trial: Path) -> bool:
     return (trial / "steps" / "step-1" / "agent" / "trajectory.json").is_file()
 
@@ -112,7 +120,7 @@ def _trial_complete(trial: Path, tasks_dir: Path | None = None) -> bool:
     if not steps or any(not (s / "agent" / "trajectory.json").is_file() for s in steps):
         return False
     if tasks_dir is not None:
-        task_steps = tasks_dir / trial.name.split("__")[0] / "steps"
+        task_steps = tasks_dir / trial_task(trial) / "steps"
         if task_steps.is_dir():
             expected = len(list(task_steps.glob("step-*")))
             if expected and len(steps) < expected:
@@ -123,14 +131,14 @@ def _trial_complete(trial: Path, tasks_dir: Path | None = None) -> bool:
 def collected(jobs_dir: Path, *, require_accept: bool = False, tasks_dir: Path | None = None) -> set[str]:
     """Task names with at least one complete trial (or QC-accepted trial when require_accept=True)."""
     if not require_accept:
-        return {t.name.split("__")[0] for t in jobs_dir.glob("*/*__*") if _trial_complete(t, tasks_dir)}
+        return {trial_task(t) for t in jobs_dir.glob("*/*__*") if _trial_complete(t, tasks_dir)}
     from . import qc
     accepted: set[str] = set()
     for t in jobs_dir.glob("*/*__*"):
         if not _trial_complete(t, tasks_dir):
             continue
         if qc.evaluate(t).verdict == "accept":
-            accepted.add(t.name.split("__")[0])
+            accepted.add(trial_task(t))
     return accepted
 
 
@@ -184,7 +192,7 @@ def run(args) -> None:
     attempts: dict[str, int] = {}
     for existing in jobs_dir.glob("*/*__*"):
         if _trial_reached_step1(existing):
-            name = existing.name.split("__")[0]
+            name = trial_task(existing)
             attempts[name] = attempts.get(name, 0) + 1
 
     def remaining() -> list[str]:
@@ -234,7 +242,7 @@ def run(args) -> None:
         if code != 0:
             print(json.dumps({"stop": "harbor-exit", "exit": code}))
             break
-        reached = {t.name.split("__")[0] for t in (jobs_dir / job).glob("*__*") if _trial_reached_step1(t)}
+        reached = {trial_task(t) for t in (jobs_dir / job).glob("*__*") if _trial_reached_step1(t)}
         for name in batch:
             attempts[name] = attempts.get(name, 0) + 1
         failed_setup = [t for t in batch if t not in reached]

@@ -35,6 +35,14 @@ def collect_plan(root, profile_paths):
                            RWKV_CONTEXT_WINDOW=str(student['contextWindow']), RWKV_MAX_TOKENS=str(student['maxTokens']),
                            RWKV_TOOL_FORMAT='xml', RWKV_PROMPT_TEMPLATE='xml', RWKV_TOOL_CALL_RECOVERY='1',
                            RWKV_IDENTICAL_CALL_LIMIT='2', RWKV_PLUGINS='none')
+                if student.get('adapterId'):
+                    env['RWKV_ADAPTER_ID'] = str(student['adapterId'])
+                if student.get('adapterVersion'):
+                    env['RWKV_ADAPTER_VERSION'] = str(student['adapterVersion'])
+                if student.get('adapterScale') is not None:
+                    env['RWKV_ADAPTER_SCALE'] = str(student['adapterScale'])
+                if student.get('historyMode'):
+                    env['RWKV_HISTORY_MODE'] = str(student['historyMode'])
             env['PATH'] = str(Path(ex['node']).parent) + ':' + env.get('PATH', '')
             with Path(budget['ownerLock']).open('a+') as lock:
                 # Existing production owns this same lock. Fail visibly instead of

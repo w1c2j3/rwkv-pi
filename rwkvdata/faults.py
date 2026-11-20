@@ -36,13 +36,17 @@ from pathlib import Path
 from typing import Callable
 
 FAULT_DIR = "/var/lib/rwkvdata"
+# Task images link the pinned web packages as /app/node_modules (harbor_export "web" toolchain); the fault
+# image (docker/fault-full.Dockerfile) carries the same /opt/web, so TSX/JSX tests resolve React the same way.
+WEB_LINK = "{ [ -e node_modules ] || [ ! -d /opt/web/node_modules ] || ln -s /opt/web/node_modules node_modules; }"
 FAULT_RECORD = f"{FAULT_DIR}/fault.json"
 MAX_TRIED = 24      # mutants validated per task
 KEEP = 4            # validated mutants shipped per task (fallbacks for edited code)
 
 TEST_FILE = re.compile(
-    r"(^|/)(tests?|__tests__|spec|fixtures?)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$")
-SOURCE_SUFFIXES = {".py", ".js", ".mjs", ".cjs", ".ts", ".c", ".h", ".go", ".sh", ".rs"}
+    r"(^|/)(tests?|__tests__|spec|fixtures?)/|(^|/)test_[^/]*$|_test\.[a-z]+$|\.(test|spec)\.[a-z]+$|Tests?\.java$")
+SOURCE_SUFFIXES = {".py", ".js", ".mjs", ".cjs", ".ts", ".tsx", ".jsx", ".c", ".h", ".cc", ".cpp", ".hpp", ".go", ".sh",
+                   ".rs", ".java"}
 _COMMENT = re.compile(r"^\s*(#|//|/\*|\*|--|\"\"\"|''')")
 
 # (name, pattern, replacement). Patterns avoid matching inside longer operators.
@@ -96,6 +100,8 @@ def candidates(files: dict[str, str], seed: str) -> list[Mutant]:
         if is_test_path(path) or Path(path).suffix not in SOURCE_SUFFIXES:
             continue
         lines = text.split("\n")
+        if path.endswith(".rs") and "#[cfg(test)]" in lines:  # inline Rust unit tests are tests too
+            lines = lines[: lines.index("#[cfg(test)]")]
         counts: dict[str, int] = {}
         for line in lines:
             counts[line] = counts.get(line, 0) + 1
@@ -143,7 +149,7 @@ def docker_runner(image: str, timeout: int = 300) -> Runner:
                 r = subprocess.run(
                     ["docker", "run", "--rm", "--name", name, "--network", "none", "-v", f"{workdir}:/src:ro", image,
                      "timeout", "-k", "10", str(timeout), "bash", "-lc",
-                     f"mkdir -p /app && cp -a /src/. /app/ && cd /app && {cmd}"],
+                     f"mkdir -p /app && cp -a /src/. /app/ && cd /app && {WEB_LINK} && {cmd}"],
                     capture_output=True, text=True, timeout=timeout + 30)
                 results.append((r.returncode, (r.stdout + r.stderr)[-2000:]))
             except subprocess.TimeoutExpired:
@@ -154,10 +160,8 @@ def docker_runner(image: str, timeout: int = 300) -> Runner:
 
 
 def _write_tree(root: Path, files: dict[str, str]) -> None:
-    for rel, text in files.items():
-        target = root / rel
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(text, encoding="utf-8")
+    from .bundle import write_workspace
+    write_workspace(root, files)
 
 
 def validate(files: dict[str, str], commands: list[str], mutants: list[Mutant], runner: Runner,
@@ -207,7 +211,7 @@ import hashlib, json, os, re, subprocess
 MUTANTS = json.loads(__MUTANTS__)
 COMMANDS = json.loads(__COMMANDS__)
 TEST_FILE = re.compile(__TEST_FILE__)
-COMPILED = (".c", ".h", ".cc", ".cpp", ".go", ".rs")
+COMPILED = (".c", ".h", ".cc", ".cpp", ".hpp", ".go", ".rs", ".java")
 record = {"injected": False, "attempts": []}
 
 def tests_fail():

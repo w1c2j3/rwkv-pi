@@ -34,6 +34,13 @@ test('complete delegation remains subject to semantic review', () => {
   const e=delegationEligibility(evidence());assert.equal(e.passed,true);assert.equal(e.semanticReviewRequired,true);
 });
 
+test('failed or partial child execution repaired by teacher is eligible when final acceptance passes', () => {
+  const e=evidence();
+  e.agents=[{state:'failed', requests:2, toolCalls:1, finishedAt:1, write:true, applied:false}];
+  e.events=['subagent_plan','subagent_start','subagent_wait','subagent_verify'].map(name=>({name}));
+  assert.equal(delegationEligibility(e).passed,true);
+});
+
 test('an explicitly selected different teacher remains independent', () => {
  const e=evidence();e.teacher={provider:'test-provider',id:'test-model'};e.messages[0].provider='test-provider';e.messages[0].model='test-model';
  assert.equal(delegationEligibility(e).passed,true);e.messages.push({...e.messages[0],model:'other'});assert.equal(delegationEligibility(e).passed,false);
@@ -69,6 +76,22 @@ test('production web tools enforce public URL safety, budgets, and evidence fram
   assert.equal(r1.results[0].url, 'https://example.com/a');
   const r2 = JSON.parse((await fetchTool.execute('c2', {url: 'https://example.com/a'})).content[0].text);
   assert.equal(r2.truncated, true);
+  assert.equal(r2.nextOffset, 5000);
   assert.equal(calls.length, 2);
   await assert.rejects(() => search.execute('c3', {query: 'third'}), /Web tool call budget reached/);
+});
+
+test('web_fetch pages a long page with offset from one upstream fetch', async () => {
+  let upstream = 0;
+  const fetchTool = createProductionWebTools({
+    callWeb: async () => { upstream++; return {title: 'Page', content: 'a'.repeat(5000) + 'b'.repeat(1500)}; },
+  }).find(t => t.name === 'web_fetch');
+  const page = async args => JSON.parse((await fetchTool.execute('c', {url: 'https://example.com/long', ...args})).content[0].text);
+  const first = await page({});
+  assert.ok(first.content.startsWith('a'.repeat(5000)) && first.nextOffset === 5000 && first.totalChars === 6500);
+  const last = await page({offset: first.nextOffset});
+  assert.equal(last.content, 'b'.repeat(1500));
+  assert.equal(last.truncated, false);
+  assert.equal(upstream, 1);
+  await assert.rejects(() => page({offset: 9999}), /beyond the end/);
 });

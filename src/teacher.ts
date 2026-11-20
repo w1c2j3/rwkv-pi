@@ -55,7 +55,12 @@ export function createTeacherProvider(config: TeacherConfig = readTeacherConfig(
     reasoning: true, input: ["text"], contextWindow: config.contextWindow, maxTokens: config.maxTokens,
     cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
     headers,
-    ...(deepseek ? { samplingParams: { thinking: { type: "enabled" }, reasoning_effort: config.reasoningEffort || "high", parallel_tool_calls: false } } : {}),
+    ...(deepseek ? { samplingParams: {
+      thinking: { type: "enabled" },
+      reasoning_effort: config.reasoningEffort || "high",
+      parallel_tool_calls: false,
+      ...(config.modelId === "rwkv-ds41f-1017" ? { chat_template_kwargs: { enable_thinking: true } } : {}),
+    } } : {}),
     compat: { supportsStore: false, supportsDeveloperRole: false, supportsReasoningEffort: false, supportsStrictMode: false, maxTokensField: "max_tokens",
       ...(deepseek ? { requiresReasoningContentOnAssistantMessages: true } : {}) },
   };

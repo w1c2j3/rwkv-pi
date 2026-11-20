@@ -6,6 +6,7 @@ import { loadEnvFile } from "node:process";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { readConfig } from "./config.js";
 import { DEFAULT_PI_TOOLS, parseToolList } from "./tools.js";
+import { WEB_TOOL_NAMES } from "./tasks.js";
 import { WORKLIST_TOOL_NAMES } from "./worklist.js";
 import { readTeacherConfig } from "./teacher.js";
 import { stallLimits } from "./stall-detector.js";
@@ -57,8 +58,11 @@ if ((ACCOUNT_COMMANDS as readonly string[]).includes(command ?? "")) {
   }
   const userArgs = plugins.args;
   const userTools = userArgs.some((arg) => arg === "--tools" || arg === "-t" || arg.startsWith("--tools="));
+  const rawTools = (process.env.RWKV_TOOLS?.trim() || DEFAULT_PI_TOOLS.join(",")).split(",").map((s) => s.trim()).filter(Boolean);
+  const selectedWeb = WEB_TOOL_NAMES.filter((name) => rawTools.includes(name));
+  const builtinRaw = rawTools.filter((name) => !(WEB_TOOL_NAMES as readonly string[]).includes(name));
   const worklistTools = config.historyMode === "worklist" ? [...WORKLIST_TOOL_NAMES] : [];
-  const tools = userTools ? [] : ["--tools", [...parseToolList(process.env.RWKV_TOOLS?.trim() || DEFAULT_PI_TOOLS), ...worklistTools, ...subagentTools].join(",")];
+  const tools = userTools ? [] : ["--tools", [...parseToolList(builtinRaw), ...selectedWeb, ...worklistTools, ...subagentTools].join(",")];
   // Training parity: the harness renders no skills, context files, prompt templates or MCP declarations.
   // RWKV_PI_PARITY=0 restores pi's discovery for exploratory use (the model never saw those prompts).
   const parity = process.env.RWKV_PI_PARITY?.trim() !== "0";

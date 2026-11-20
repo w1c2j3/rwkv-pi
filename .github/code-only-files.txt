@@ -16,6 +16,7 @@ data_pipeline/__init__.py
 data_pipeline/__main__.py
 data_pipeline/collect.mjs
 data_pipeline/core.py
+data_pipeline/dagger_rollout.mjs
 data_pipeline/delegated_rollout.mjs
 data_pipeline/delegation.mjs
 data_pipeline/execution.py
@@ -39,6 +40,7 @@ patches/lightning/0001-continuous-trajectory-labels.patch
 patches/pi-next/0001-sandboxable-search-tools.patch
 patches/pi/0001-sandboxable-search-tools.patch
 pi-source.lock.json
+pipeline/answer-evidence.mjs
 pipeline/compile-lightning-dataset.mjs
 pipeline/datakit.py
 pipeline/trajectory-packing.mjs
@@ -49,6 +51,7 @@ rwkvdata/bundle.py
 rwkvdata/categories.py
 rwkvdata/collect.py
 rwkvdata/docker/fault-base.Dockerfile
+rwkvdata/docker/fault-full.Dockerfile
 rwkvdata/dsh_import.py
 rwkvdata/faults.py
 rwkvdata/harbor_export.py
@@ -84,10 +87,12 @@ src/extension.ts
 src/harness-cli.ts
 src/harness.ts
 src/lightning.ts
+src/login.ts
 src/loop-guard.ts
 src/orchestrate-cli.ts
 src/orchestrator-extension.ts
 src/plugins.ts
+src/profile.ts
 src/project-participation.ts
 src/prompt.ts
 src/provenance.ts
@@ -107,6 +112,7 @@ src/token-budget.ts
 src/tolerant-tools.ts
 src/tools.ts
 src/transport.ts
+src/web-tools.ts
 src/worklist.ts
 src/xml.ts
 tasks/smoke.jsonl
@@ -117,6 +123,7 @@ test/auto-collab.test.mjs
 test/collaboration.test.mjs
 test/config.test.mjs
 test/conformance.test.mjs
+test/dagger.test.mjs
 test/deepseek-teacher.test.mjs
 test/doctor.test.mjs
 test/epoch.test.mjs
@@ -128,6 +135,7 @@ test/loop-guard.test.mjs
 test/orchestrator-extension.test.mjs
 test/orchestrator-flow.test.mjs
 test/plugins.test.mjs
+test/profile.test.mjs
 test/project-participation.test.mjs
 test/recovery.test.mjs
 test/sandbox-search.test.mjs
@@ -143,5 +151,6 @@ test/test_xml_protocol.py
 test/token-budget.test.mjs
 test/tolerant-tools.test.mjs
 test/tool-adapter.test.mjs
+test/web-tools.test.mjs
 test/worklist.test.mjs
 tsconfig.json
