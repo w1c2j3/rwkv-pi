@@ -62,7 +62,9 @@ rwkvdata/tests/__init__.py
 rwkvdata/tests/test_faults.py
 rwkvdata/tests/test_rwkvdata.py
 scripts/activate-pi.sh
+scripts/autochain-gcp-6p5b.py
 scripts/build-lightning-tokenizer.mjs
+scripts/build-stage1cde-6p5b.py
 scripts/check-code-only.py
 scripts/conformance.mjs
 scripts/install-lightning.py

@@ -46,7 +46,9 @@
 !/pipeline/datakit.py
 !/pipeline/trajectory-packing.mjs
 !/scripts/activate-pi.sh
+!/scripts/autochain-gcp-6p5b.py
 !/scripts/build-lightning-tokenizer.mjs
+!/scripts/build-stage1cde-6p5b.py
 !/scripts/check-code-only.py
 !/scripts/install-lightning.py
 !/scripts/install.sh
