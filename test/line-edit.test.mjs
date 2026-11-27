@@ -498,3 +498,43 @@ test("convertTrajectoryToLineEdit losslessly upgrades legacy v1 line-edit trajec
   assert.match(res.messages[4].reasoning_content, /确认目标位置：calc\.py 第 2 行/);
   assert.match(res.messages[5].content, /=== calc\.py \(lines 1-2 of 2\) ===/);
 });
+
+test("createLineModeTools resolves Windows drive-letter workspace paths cleanly for read and edit", async () => {
+  const winCwd = "F:\\rwkv-win-e2e\\demos\\06-textindex";
+  const files = new Map([
+    ["F:\\rwkv-win-e2e\\demos\\06-textindex\\textindex\\index.py", "def search(q):\n    return []\n"],
+  ]);
+  const mockWinFs = {
+    async readFile(p) {
+      const v = files.get(p);
+      if (v === undefined) throw new Error(`ENOENT: ${p}`);
+      return Buffer.from(v, "utf8");
+    },
+    async writeFile(p, content) {
+      files.set(p, typeof content === "string" ? content : content.toString("utf8"));
+    },
+    async exists(p) {
+      return files.has(p);
+    },
+    async listFiles() {
+      return ["textindex/index.py"];
+    },
+  };
+  const rawTools = [
+    { name: "read", description: "r", parameters: {}, execute: async () => ({ content: [] }) },
+    { name: "edit", description: "e", parameters: {}, execute: async () => ({ content: [] }) },
+  ];
+  const tools = createLineModeTools(rawTools, winCwd, mockWinFs, { tolerance: true });
+  const readTool = tools.find((t) => t.name === "read");
+  const editTool = tools.find((t) => t.name === "edit");
+
+  const readRes = await readTool.execute("r1", { path: "textindex/index.py" });
+  assert.match(readRes.content[0].text, /^=== textindex\/index\.py \(lines 1-2 of 2\) ===/);
+
+  const editRes = await editTool.execute("e1", {
+    path: "textindex/index.py",
+    edits: [{ start_line: 2, end_line: 2, start_text: "    return []", new_text: "    return [q]" }],
+  });
+  assert.match(editRes.content[0].text, /=== textindex\/index\.py \(lines 1-2 of 2\) ===/);
+  assert.equal(files.get("F:\\rwkv-win-e2e\\demos\\06-textindex\\textindex\\index.py"), "def search(q):\n    return [q]\n");
+});

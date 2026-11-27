@@ -44,7 +44,7 @@ curl -fsSL https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/reso
 ### 2. 开始使用
 
 ```bash
-cd ~/rwkv-agent/demos/01-portal-security
+cd ~/rwkv-agent/demos/06-textindex
 pi
 ```
 
@@ -83,7 +83,7 @@ curl -fsSL https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/reso
 按 `Win + X` 打开「终端」或「PowerShell」，执行：
 
 ```powershell
-irm https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1 | iex
+curl.exe -fsSL https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1 | Out-String | iex
 ```
 
 缺少 Node.js、Git 或 Python 时，脚本会通过 `winget` 自动安装（可能弹出一次管理员授权）。**装完后直接在当前窗口使用即可，不用重开。**
@@ -91,7 +91,7 @@ irm https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/mai
 ### 2. 开始使用
 
 ```powershell
-cd $HOME\rwkv-agent\demos\01-portal-security
+cd $HOME\rwkv-agent\demos\06-textindex
 pi
 ```
 
@@ -99,26 +99,24 @@ pi
 
 ### 3. 可选参数
 
-需要传参时，改用下面这种写法：
+想指定安装盘符或模型精度时，在命令前加上环境变量即可：
 
 ```powershell
-& ([scriptblock]::Create((irm https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1))) -InstallDir D:\rwkv-agent -Precision bf16
+$env:RWKV_AGENT_DIR="D:\rwkv-agent"; $env:RWKV_PRECISION="bf16"; curl.exe -fsSL https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1 | Out-String | iex
 ```
 
-| 参数 | 作用 |
+| 环境变量（或脚本参数） | 作用 |
 | :--- | :--- |
-| `-InstallDir <路径>` | 安装目录，默认 `$HOME\rwkv-agent` |
-| `-Precision w8a16\|bf16` | 手动指定权重，默认按显存自动选择 |
-| `-DeepSeekKey <KEY>` | 安装时一并写入 DeepSeek Key |
-| `-Cuda 13.2` | 改用 CUDA 13.2 版引擎 |
-| `-HfEndpoint https://huggingface.co` | 海外网络：改用官方 Hugging Face |
-| `-InstallOnly` | 只安装，暂不启动引擎 |
+| `RWKV_AGENT_DIR`（`-InstallDir`） | 安装目录，默认 `$HOME\rwkv-agent` |
+| `RWKV_PRECISION`（`-Precision`） | `w8a16` 或 `bf16`，默认按空闲显存自动选择 |
+| `DEEPSEEK_API_KEY`（`-DeepSeekKey`） | 安装时一并写入 DeepSeek Key |
+| `RWKV_CUDA_VER`（`-Cuda`） | 设为 `13.2` 可改用 CUDA 13.2 版引擎 |
+| `HF_ENDPOINT`（`-HfEndpoint`） | 海外网络可设为 `https://huggingface.co` |
 
 ### 4. 常见问题
 
-- **输入 `python` 弹出微软应用商店**：打开「设置 → 应用 → 高级应用设置 → 应用执行别名」，关闭 `python.exe` 和 `python3.exe` 两项。
 - **开着 Clash / v2rayN 时连不上本地引擎**：`pi` 已自动直连 `127.0.0.1`。如果开启了 TUN 全局模式，请在代理规则中放行 `127.0.0.1`。
-- **首次加载模型很慢**：在「Windows 安全中心 → 病毒和威胁防护 → 排除项」中加入安装目录。
+- **首次加载模型偏慢**：在「Windows 安全中心 → 病毒和威胁防护 → 排除项」中加入安装目录。
 
 ---
 
@@ -177,7 +175,7 @@ Demo 位于安装目录下的 `demos/`，完整题目见 `demos/PROMPTS.zh-CN.md
 | `07-cachebox-git` | 翻 Git 历史定位引入回归的提交 | 0/3，挑战题 | 否 |
 
 > [!NOTE]
-> 7B 本地模型不保证每次都一次成功。没过时可以在对话里补充提示，或者执行 `rwkv-demos reset` 后重试。以下题目中的 `python3`，在 Windows 上请改为 `python`。
+> 7B 本地模型不保证每次都一次成功。没过时可以在对话里补充提示，或者执行 `rwkv-demos reset` 后重试。
 
 ### 实测 1：回归定位修复（纯本地，推荐先跑）
 

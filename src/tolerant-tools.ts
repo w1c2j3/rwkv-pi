@@ -20,7 +20,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import * as nodeModule from "node:module";
-import { posix } from "node:path";
+import { dirname as hostDirname, join as hostJoin, posix, win32 } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 
 /** File access in the agent's view of the workspace (the host, or inside a sandbox). */
@@ -39,7 +39,7 @@ const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 export const hostFs: WorkspaceFs = {
   readFile: (path) => readFile(path),
   writeFile: async (path, content) => {
-    await mkdir(posix.dirname(path), { recursive: true });
+    await mkdir(hostDirname(path), { recursive: true });
     await writeFile(path, content);
   },
   exists: async (path) => { try { await stat(path); return true; } catch { return false; } },
@@ -52,7 +52,7 @@ export const hostFs: WorkspaceFs = {
         if (out.length >= MAX_LISTED_FILES) return;
         if (skip.has(entry.name)) continue;
         const path = rel ? `${rel}/${entry.name}` : entry.name;
-        if (entry.isDirectory()) await walk(posix.join(dir, entry.name), path);
+        if (entry.isDirectory()) await walk(hostJoin(dir, entry.name), path);
         else if (entry.isFile()) out.push(path);
       }
     };
@@ -72,15 +72,20 @@ process.stdout.write(JSON.stringify(out))`;
 // ---------------------------------------------------------------------------------------------
 // Paths
 
-const normalizeWorkspaceAlias = (cwd: string, rawPath: string): string => {
-  const cleaned = rawPath.replace(/^@/, "");
+export const isWindowsPath = (p: string): boolean => /^[A-Za-z]:[\\/]/.test(p) || p.startsWith("\\\\");
+export const workspacePathApi = (cwd: string) => (isWindowsPath(cwd) ? win32 : posix);
+
+export const normalizeWorkspaceAlias = (cwd: string, rawPath: string): string => {
+  const cleaned = rawPath.trim().replace(/^@/, "");
   if (cwd !== "/workspace" && (cleaned === "/workspace" || cleaned.startsWith("/workspace/"))) {
-    return cwd + cleaned.slice("/workspace".length);
+    const rest = cleaned.slice("/workspace".length).replace(/^\/+/, "");
+    return rest ? workspacePathApi(cwd).join(cwd, rest) : cwd;
   }
   return cleaned;
 };
-const components = (path: string, cwd = "/workspace") => normalizeWorkspaceAlias(cwd, path).split("/").filter((part) => part && part !== ".");
-const resolveIn = (cwd: string, path: string) => posix.resolve(cwd, normalizeWorkspaceAlias(cwd, path));
+const components = (path: string, cwd = "/workspace") => normalizeWorkspaceAlias(cwd, path).replaceAll("\\", "/").split("/").filter((part) => part && part !== ".");
+export const resolveIn = (cwd: string, path: string): string => workspacePathApi(cwd).resolve(cwd, normalizeWorkspaceAlias(cwd, path));
+export const relativeToWorkspace = (cwd: string, absPath: string): string => workspacePathApi(cwd).relative(cwd, absPath).replaceAll("\\", "/");
 
 /** Drop an immediately repeated run of components: inputs/src/inputs/src/app.py -> inputs/src/app.py. */
 export function collapseRepeats(parts: readonly string[]): string[] {
@@ -144,7 +149,7 @@ export async function repairPath(requested: string, cwd: string, fs: WorkspaceFs
   }
   // Nothing by that name: list the deepest existing directory on the requested path.
   const absolute = resolveIn(cwd, requested);
-  const relative = posix.relative(cwd, absolute);
+  const relative = relativeToWorkspace(cwd, absolute);
   const inside = relative && !relative.startsWith("..") ? relative.split("/") : [];
   const directories = new Set<string>([""]);
   for (const file of files) { const parts = file.split("/"); for (let i = 1; i < parts.length; i++) directories.add(parts.slice(0, i).join("/")); }
@@ -708,7 +713,7 @@ async function checkFileSyntax(text: string, path: string): Promise<string | und
     try { JSON.parse(text); return ""; }
     catch (error) { return `JSON SyntaxError: ${messageOf(error).split("\n")[0]}`; }
   }
-  if (ext === ".py") return spawnSyntaxCheck("python3", ["-I", "-c", PY_AST_CHECK, path], text);
+  if (ext === ".py") return spawnSyntaxCheck(process.platform === "win32" ? "python" : "python3", ["-I", "-c", PY_AST_CHECK, path], text);
   if (ext === ".sh" || ext === ".bash") return spawnSyntaxCheck("bash", ["-n"], text);
   if (!stripTsTypes) return undefined;
   try { stripTsTypes(text, { mode: "strip" }); return ""; }
@@ -902,10 +907,11 @@ function tolerantWrite(execute: Execute, baseCwd: string, fs: WorkspaceFs): Exec
     let previous: string | undefined;
     if (await fs.exists(absolute)) { try { previous = (await fs.readFile(absolute)).toString("utf8"); } catch { /* A directory: pi reports it. */ } }
     let missing = "";
-    for (let dir = posix.dirname(absolute); dir !== posix.dirname(dir) && !(await fs.exists(dir)); dir = posix.dirname(dir)) missing = dir;
+    const pApi = workspacePathApi(cwd);
+    for (let dir = pApi.dirname(absolute); dir !== pApi.dirname(dir) && !(await fs.exists(dir)); dir = pApi.dirname(dir)) missing = dir;
     const result = await execute(id, args, signal, onUpdate, ctx);
     const notes: string[] = [];
-    if (missing) notes.push(`Created new directory ${posix.relative(cwd, missing) || missing}; it did not exist before.`);
+    if (missing) notes.push(`Created new directory ${relativeToWorkspace(cwd, missing) || missing}; it did not exist before.`);
     if (previous !== undefined) notes.push(overwriteSummary(previous, String(args.content ?? "")));
     return notes.length ? annotate(result, notes.join("\n"), "after") : result;
   };

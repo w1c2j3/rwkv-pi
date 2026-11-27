@@ -28,8 +28,10 @@ import {
   introducedEditSyntaxError,
   reindent,
   repairPath,
+  resolveIn,
   similarity,
   withTolerance,
+  workspacePathApi,
   type WorkspaceFs,
 } from "./tolerant-tools.js";
 
@@ -1032,10 +1034,7 @@ export class LineViewTracker {
     readText: (absPath: string) => Promise<string>,
   ): Promise<void> {
     const sha = (s: string) => createHash("sha256").update(s).digest("hex");
-    const resolveAbs = (raw: string) => {
-      const clean = raw.trim().replace(/^@/, "");
-      return clean.startsWith("/") ? clean : posix.resolve(cwd, clean);
-    };
+    const resolveAbs = (raw: string) => resolveIn(cwd, raw);
     for (const msg of messages) {
       if (msg?.role === "assistant") {
         const blocks = Array.isArray(msg.content) ? msg.content : [];
@@ -1197,17 +1196,10 @@ export function prepareLineEditArguments(input: unknown): unknown {
   return args;
 }
 
-function normalizePathArg(cwd: string, rawPath: string): string {
-  const cleaned = rawPath.trim().replace(/^@/, "");
-  if (cwd !== "/workspace" && (cleaned === "/workspace" || cleaned.startsWith("/workspace/"))) {
-    return cwd + cleaned.slice("/workspace".length);
-  }
-  return cleaned;
-}
-
 function toDisplayPath(cwd: string, absPath: string): string {
-  const rel = posix.relative(cwd, absPath);
-  return rel && !rel.startsWith("..") && !posix.isAbsolute(rel) ? rel : absPath;
+  const pApi = workspacePathApi(cwd);
+  const rel = pApi.relative(cwd, absPath);
+  return rel && !rel.startsWith("..") && !pApi.isAbsolute(rel) ? rel.replaceAll("\\", "/") : absPath;
 }
 
 async function resolveExistingFile(
@@ -1216,14 +1208,14 @@ async function resolveExistingFile(
   fs: WorkspaceFs,
   tolerance: boolean,
 ): Promise<{ absPath: string; displayPath: string; note?: string }> {
-  const direct = posix.resolve(cwd, normalizePathArg(cwd, rawPath));
+  const direct = resolveIn(cwd, rawPath);
   if (await fs.exists(direct)) {
     return { absPath: direct, displayPath: toDisplayPath(cwd, direct) };
   }
   if (tolerance) {
     const repair = await repairPath(rawPath, cwd, fs, "file");
     if (repair.path) {
-      const repairedAbs = posix.resolve(cwd, repair.path);
+      const repairedAbs = resolveIn(cwd, repair.path);
       return {
         absPath: repairedAbs,
         displayPath: repair.path,
@@ -1274,7 +1266,7 @@ export function createLineModeTools(
           const cwd = ctx?.cwd || baseCwd;
           const rawPath = String(args?.path ?? (tolerance ? args?.file_path : "") ?? "").trim();
           if (!rawPath) throw new Error("read requires a non-empty path.");
-          const ext = posix.extname(rawPath).toLowerCase();
+          const ext = posix.extname(rawPath.replaceAll("\\", "/")).toLowerCase();
           if (IMAGE_EXTENSIONS.has(ext)) {
             return fallbackExec(id, { path: rawPath }, signal, onUpdate, ctx);
           }
@@ -1402,7 +1394,7 @@ export function createLineModeTools(
           const cwd = ctx?.cwd || baseCwd;
           const rawPath = typeof args?.path === "string" ? args.path.trim() : "";
           if (rawPath && typeof args?.content === "string") {
-            const absPath = posix.resolve(cwd, normalizePathArg(cwd, rawPath));
+            const absPath = resolveIn(cwd, rawPath);
             tracker.recordWrite(absPath, toDisplayPath(cwd, absPath), sha256(args.content), splitFileLines(args.content).lines.length);
           }
           return res;

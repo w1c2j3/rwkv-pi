@@ -533,7 +533,7 @@ cat <<EOF
   Engine API   : http://127.0.0.1:$PORT/v1
 
   Next: open a new terminal (or run: source $rc_file), then
-       cd "$INSTALL_DIR/demos/01-portal-security" && pi
+       cd "$INSTALL_DIR/demos/06-textindex" && pi
 
   Optional DeepSeek key (web_search + /rwkv-subagent):
        rwkv-engine set-deepseek <DEEPSEEK_API_KEY>

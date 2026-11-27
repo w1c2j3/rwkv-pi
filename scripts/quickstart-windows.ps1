@@ -4,27 +4,28 @@
 
 .DESCRIPTION
   Installs missing Node.js / Git / Python via winget, downloads prebuilt rwkv_lightning_cuda
-  Windows x64 binaries, downloads & verifies RWKV-7 7.2B weights (auto-selected by GPU memory)
+  Windows x64 binaries, downloads & verifies RWKV-7 7.2B v0.2 weights (auto-selected by free GPU memory)
   and the built-in demo projects from Hugging Face (default: hf-mirror.com), builds rwkv-pi,
   and registers `pi`, `rwkv-engine`, and `rwkv-demos` into your Windows User PATH.
 
 .EXAMPLE
-  irm https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1 | iex
-  & ([scriptblock]::Create((irm <url>))) -InstallDir "D:\rwkv-agent" -Precision bf16
+  curl.exe -fsSL https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1 | Out-String | iex
+  $env:RWKV_AGENT_DIR="D:\rwkv-agent"; curl.exe -fsSL https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1 | Out-String | iex
 #>
 [CmdletBinding()]
 param(
-  [string]$InstallDir = "$HOME\rwkv-agent",
+  [string]$InstallDir = $(if ($env:RWKV_AGENT_DIR) { $env:RWKV_AGENT_DIR } else { "$HOME\rwkv-agent" }),
   [ValidateSet("auto", "w8a16", "bf16")]
-  [string]$Precision = "auto",
+  [string]$Precision = $(if ($env:RWKV_PRECISION) { $env:RWKV_PRECISION } else { "auto" }),
   [ValidateSet("12.9", "13.2")]
-  [string]$Cuda = "12.9",
-  [string]$DeepSeekKey = "",
-  [string]$HfEndpoint = "https://hf-mirror.com",
-  [int]$Port = 8000,
-  [string]$ApiKey = "rwkv-local",
-  [string]$PiRepo = "https://github.com/w1c2j3/rwkv-pi.git",
-  [switch]$InstallOnly
+  [string]$Cuda = $(if ($env:RWKV_CUDA_VER) { $env:RWKV_CUDA_VER } else { "12.9" }),
+  [string]$DeepSeekKey = $(if ($env:DEEPSEEK_API_KEY) { $env:DEEPSEEK_API_KEY } else { "" }),
+  [string]$HfEndpoint = $(if ($env:HF_ENDPOINT) { $env:HF_ENDPOINT } else { "https://hf-mirror.com" }),
+  [int]$Port = $(if ($env:RWKV_PORT) { [int]$env:RWKV_PORT } else { 8000 }),
+  [string]$ApiKey = $(if ($env:RWKV_API_KEY) { $env:RWKV_API_KEY } else { "rwkv-local" }),
+  [string]$PiRepo = $(if ($env:RWKV_PI_REPO) { $env:RWKV_PI_REPO } else { "https://github.com/w1c2j3/rwkv-pi.git" }),
+  [switch]$InstallOnly,
+  [switch]$SkipUserPath
 )
 
 $ErrorActionPreference = "Stop"
@@ -33,10 +34,32 @@ $HfEndpoint = $HfEndpoint.TrimEnd("/")
 $NpmRegistry = if ($HfEndpoint -like "*huggingface.co*") { "https://registry.npmjs.org" } else { "https://registry.npmmirror.com" }
 $env:GIT_TERMINAL_PROMPT = "0"
 
+# Run external native commands without PowerShell 5.1 turning stderr progress/warnings into terminating errors.
+function Invoke-Native([scriptblock]$Script) {
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "Continue"
+  try {
+    & $Script | Out-Host
+    return $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+}
+
 function Assert-Command([string]$Name, [string]$Hint) {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
     throw "[ERROR] Missing required command '$Name'. $Hint"
   }
+}
+
+function Download-File([string]$Url, [string]$Dest) {
+  $curlExe = "$env:SystemRoot\System32\curl.exe"
+  if (Test-Path $curlExe) {
+    $rc = Invoke-Native { & $curlExe -fsSL --retry 5 --retry-delay 2 -H "User-Agent: curl/8.5" $Url -o $Dest }
+    if ($rc -ne 0) { throw "curl.exe failed downloading $Url (exit $rc)" }
+    return
+  }
+  Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Dest -Headers @{ "User-Agent" = "curl/8.5" }
 }
 
 function Download-Resumable([string]$Url, [string]$Dest) {
@@ -44,17 +67,36 @@ function Download-Resumable([string]$Url, [string]$Dest) {
   if ($aria2) {
     $dir = Split-Path -Parent $Dest
     $name = Split-Path -Leaf $Dest
-    & $aria2.Source -x 16 -s 16 -c --auto-file-renaming=false --allow-overwrite=true -d $dir -o $name $Url
-    if ($LASTEXITCODE -ne 0) { throw "aria2c failed downloading $Url" }
+    $rc = Invoke-Native { & $aria2.Source -x 16 -s 16 -c --auto-file-renaming=false --allow-overwrite=true -d $dir -o $name $Url }
+    if ($rc -ne 0) { throw "aria2c failed downloading $Url (exit $rc)" }
     return
   }
   $curlExe = "$env:SystemRoot\System32\curl.exe"
   if (Test-Path $curlExe) {
-    & $curlExe -fL --retry 5 --retry-delay 2 -C - -H "User-Agent: curl/8.5" $Url -o $Dest
-    if ($LASTEXITCODE -ne 0) { throw "curl.exe failed downloading $Url" }
+    $rc = Invoke-Native { & $curlExe -fL --retry 5 --retry-delay 2 -C - -H "User-Agent: curl/8.5" $Url -o $Dest }
+    if ($rc -ne 0) {
+      if (Test-Path $Dest) { Remove-Item -Force $Dest -ErrorAction SilentlyContinue }
+      $rc = Invoke-Native { & $curlExe -fL --retry 5 --retry-delay 2 -H "User-Agent: curl/8.5" $Url -o $Dest }
+      if ($rc -ne 0) { throw "curl.exe failed downloading $Url (exit $rc)" }
+    }
     return
   }
   Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Dest -Headers @{ "User-Agent" = "curl/8.5" }
+}
+
+function Expand-ZipFast([string]$ZipPath, [string]$DestDir) {
+  $tarExe = "$env:SystemRoot\System32\tar.exe"
+  if (Test-Path $tarExe) {
+    $rc = Invoke-Native { & $tarExe -xf $ZipPath -C $DestDir }
+    if ($rc -eq 0) { return }
+  }
+  $oldProg = $ProgressPreference
+  $ProgressPreference = "SilentlyContinue"
+  try {
+    Expand-Archive -Path $ZipPath -DestinationPath $DestDir -Force
+  } finally {
+    $ProgressPreference = $oldProg
+  }
 }
 
 function Update-SessionPath {
@@ -68,14 +110,14 @@ function Invoke-Winget([string]$Verb, [string]$Id, [string]$Label) {
     throw "[ERROR] $Label is missing and winget is unavailable. Install $Label manually, then re-run."
   }
   Write-Host "    $Verb $Label via winget ($Id)..."
-  & winget $Verb --id $Id -e --silent --accept-source-agreements --accept-package-agreements
+  $null = Invoke-Native { & winget $Verb --id $Id -e --silent --accept-source-agreements --accept-package-agreements }
   Update-SessionPath
 }
 
 function Test-NodeOk {
   if (-not (Get-Command node -ErrorAction SilentlyContinue)) { return $false }
-  & node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>22||(a===22&&b>=19)?0:1)"
-  return ($LASTEXITCODE -eq 0)
+  $rc = Invoke-Native { & node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>22||(a===22&&b>=19)?0:1)" }
+  return ($rc -eq 0)
 }
 
 function Test-PythonOk {
@@ -98,17 +140,20 @@ if (-not (Test-PythonOk)) {
   if (-not (Test-PythonOk)) { Write-Host "    [WARN] Python not found; Python-based demos will not run." -ForegroundColor Yellow }
 }
 Assert-Command "npm.cmd" "npm comes bundled with Node.js"
-Write-Host "    node $(& node -v), $(& git --version)"
+$null = Invoke-Native { & node -v }
+Write-Host "    Node.js & Git verified."
 
 # Pick weights by FREE memory on GPU 0 (the engine's device): BF16 needs ~14.2 GB, W8A16 ~8.5 GB.
 $VramFree = $null
 $smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
 if ($smi) {
+  $prevEap = $ErrorActionPreference
+  $ErrorActionPreference = "SilentlyContinue"
   $gpuInfo = (& $smi.Source --id=0 --query-gpu=memory.total,memory.free --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
-  if ($gpuInfo) {
-    $parts = "$gpuInfo".Split(",")
-    $VramTotal = [int]$parts[0].Trim()
-    $VramFree = [int]$parts[1].Trim()
+  $ErrorActionPreference = $prevEap
+  if ($gpuInfo -and "$gpuInfo" -match "^\s*(\d+)\s*,\s*(\d+)") {
+    $VramTotal = [int]$Matches[1]
+    $VramFree = [int]$Matches[2]
     Write-Host "    GPU 0 memory: $VramFree MiB free / $VramTotal MiB total"
   }
 }
@@ -132,7 +177,7 @@ foreach ($sub in @("models", "bin", "logs", "data")) {
 $HfRepo = "RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource"
 $HfBase = "$HfEndpoint/$HfRepo/resolve/main"
 $SumsPath = Join-Path $InstallDir "models\SHA256SUMS.txt"
-Download-Resumable "$HfBase/SHA256SUMS.txt" $SumsPath
+Download-File "$HfBase/SHA256SUMS.txt" $SumsPath
 $Sums = @{}
 foreach ($line in (Get-Content $SumsPath)) {
   $parts = $line.Trim() -split "\s+"
@@ -162,11 +207,12 @@ if ((Test-Path $EngineExe) -and (Test-Path $VocabPath)) {
   if (Test-Path (Join-Path $InstallDir "bundle")) {
     Remove-Item -Recurse -Force (Join-Path $InstallDir "bundle")
   }
-  Expand-Archive -Path $ZipPath -DestinationPath $InstallDir -Force
+  Write-Host "    Extracting engine bundle..."
+  Expand-ZipFast $ZipPath $InstallDir
   Remove-Item -Force $ZipPath
 }
-& $EngineExe --version
-if ($LASTEXITCODE -ne 0) { throw "[ERROR] rwkv_lighting_cuda.exe --version failed." }
+$rc = Invoke-Native { & $EngineExe --version }
+if ($rc -ne 0) { throw "[ERROR] rwkv_lighting_cuda.exe --version failed (exit $rc)." }
 
 Write-Host "==> [3/6] Preparing RWKV-7 7.2B model weights ($Precision)..." -ForegroundColor Cyan
 if ($Precision -eq "w8a16") {
@@ -187,8 +233,7 @@ if (-not $ExpectedModelSha) {
 $ModelVerified = $false
 if (Test-Path $ModelPath) {
   Write-Host "    Checking existing $ModelFile SHA-256..."
-  $curSha = (Get-FileHash -Algorithm SHA256 -Path $ModelPath).Hash.ToLowerInvariant()
-  if ($curSha -eq $ExpectedModelSha) {
+  if (Test-Sha $ModelPath $ExpectedModelSha) {
     $ModelVerified = $true
     Write-Host "    Verified existing model ($ExpectedModelSha)."
   }
@@ -196,10 +241,10 @@ if (Test-Path $ModelPath) {
 
 if (-not $ModelVerified) {
   Write-Host "    Downloading $ModelFile from $HfEndpoint/$HfRepo ..."
-  Download-Resumable "$HfEndpoint/$HfRepo/resolve/main/$ModelFile" $ModelPath
+  Download-Resumable "$HfBase/$ModelFile" $ModelPath
   if ($Precision -eq "w8a16") {
     try {
-      Download-Resumable "$HfEndpoint/$HfRepo/resolve/main/$ModelFile.source.json" "$ModelPath.source.json"
+      Download-File "$HfBase/$ModelFile.source.json" "$ModelPath.source.json"
     } catch {}
   }
   Write-Host "    Verifying SHA-256 checksum (may take 15-30s)..."
@@ -212,9 +257,9 @@ if (-not $ModelVerified) {
 
 Write-Host "==> [4/6] Downloading built-in real-world demo benchmark suite (demos\)..." -ForegroundColor Cyan
 $DemosZip = Join-Path $InstallDir "rwkv-pi-demos.zip"
-Download-Resumable "$HfEndpoint/$HfRepo/resolve/main/rwkv-pi-demos.zip" $DemosZip
+Download-File "$HfBase/rwkv-pi-demos.zip" $DemosZip
 if (-not (Test-Path (Join-Path $InstallDir "demos\.templates"))) {
-  Expand-Archive -Path $DemosZip -DestinationPath $InstallDir -Force
+  Expand-ZipFast $DemosZip $InstallDir
   Write-Host "    Extracted 7 real-world demo sandboxes to $InstallDir\demos\"
 } else {
   Write-Host "    Existing $InstallDir\demos\ preserved (run 'rwkv-demos reset' anytime to restore clean copies)."
@@ -223,30 +268,26 @@ if (-not (Test-Path (Join-Path $InstallDir "demos\.templates"))) {
 Write-Host "==> [5/6] Installing and building rwkv-pi client..." -ForegroundColor Cyan
 $PiDir = Join-Path $InstallDir "rwkv-pi"
 if (-not (Test-Path (Join-Path $PiDir ".git"))) {
-  & git clone --depth 1 $PiRepo $PiDir
-  if ($LASTEXITCODE -ne 0) { throw "[ERROR] git clone failed for $PiRepo" }
+  $rc = Invoke-Native { & git clone --depth 1 $PiRepo $PiDir }
+  if ($rc -ne 0) { throw "[ERROR] git clone failed for $PiRepo (exit $rc)" }
 } else {
-  & git -C $PiDir pull --ff-only
-  if ($LASTEXITCODE -ne 0) { Write-Host "    [WARN] Could not update rwkv-pi; keeping the existing copy." -ForegroundColor Yellow }
+  $rc = Invoke-Native { & git -C $PiDir pull --ff-only }
+  if ($rc -ne 0) { Write-Host "    [WARN] Could not update rwkv-pi; keeping the existing copy." -ForegroundColor Yellow }
 }
 Push-Location $PiDir
 try {
-  & npm.cmd ci --no-audit --no-fund --registry $NpmRegistry
-  if ($LASTEXITCODE -ne 0) { throw "[ERROR] npm ci failed inside $PiDir" }
+  $rc = Invoke-Native { & npm.cmd ci --no-audit --no-fund --registry $NpmRegistry }
+  if ($rc -ne 0) { throw "[ERROR] npm ci failed inside $PiDir (exit $rc)" }
 } finally {
   Pop-Location
 }
 
 $EnvPath = Join-Path $PiDir ".env"
-if (-not $DeepSeekKey) {
-  if ($env:DEEPSEEK_API_KEY) {
-    $DeepSeekKey = $env:DEEPSEEK_API_KEY.Trim()
-  } elseif (Test-Path $EnvPath) {
-    foreach ($ln in (Get-Content $EnvPath)) {
-      if ($ln -match "^DEEPSEEK_API_KEY=(.+)$") {
-        $DeepSeekKey = $Matches[1].Trim()
-        break
-      }
+if (-not $DeepSeekKey -and (Test-Path $EnvPath)) {
+  foreach ($ln in (Get-Content $EnvPath)) {
+    if ($ln -match "^DEEPSEEK_API_KEY=(.+)$") {
+      $DeepSeekKey = $Matches[1].Trim()
+      break
     }
   }
 }
@@ -294,12 +335,16 @@ $EnvLines = @(
   "# ============================================================"
   "# DeepSeek Official API Key (Optional)"
   "# Used by BOTH native web search (web_search / web_fetch) AND /rwkv-subagent collaboration."
-  "# Set via: rwkv-engine set-deepseek sk-xxxx   (or paste directly below)"
+  "# Set via: rwkv-engine set-deepseek <DEEPSEEK_API_KEY>   (or paste directly below)"
   "# ============================================================"
   "DEEPSEEK_API_KEY=$DeepSeekKey"
   "RWKV_WEB_API_KEY=$DeepSeekKey"
 ) -join "`n"
 Set-Content -Path $EnvPath -Value ($EnvLines + "`n") -Encoding Ascii
+
+# Provide python3 shims (for CMD/PowerShell and Git Bash) so `python3` never hits Windows Store's stub.
+Set-Content -Path (Join-Path $InstallDir "bin\python3.cmd") -Value "@echo off`r`npython %*`r`n" -Encoding Ascii
+[System.IO.File]::WriteAllBytes((Join-Path $InstallDir "bin\python3"), [System.Text.Encoding]::ASCII.GetBytes("#!/usr/bin/env sh`nexec python `"`$@`"`n"))
 
 $EnginePs1 = @'
 param(
@@ -321,9 +366,16 @@ $BaseUrl = "http://$($Conf.host):$($Conf.port)/v1"
 
 function Get-LocalJson([string]$Path) {
   $curlExe = "$env:SystemRoot\System32\curl.exe"
-  $raw = & $curlExe --noproxy "*" -fsS --max-time 3 -H "Authorization: Bearer $($Conf.apiKey)" "$BaseUrl$Path" 2>$null
-  if ($LASTEXITCODE -ne 0 -or -not $raw) { return $null }
-  try { return ($raw | ConvertFrom-Json) } catch { return $null }
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "SilentlyContinue"
+  try {
+    $raw = & $curlExe --noproxy "*" -fs --max-time 3 -H "Authorization: Bearer $($Conf.apiKey)" "$BaseUrl$Path" 2>$null
+    $rc = $LASTEXITCODE
+  } finally {
+    $ErrorActionPreference = $prev
+  }
+  if ($rc -ne 0 -or -not $raw) { return $null }
+  try { return (($raw -join "`n") | ConvertFrom-Json) } catch { return $null }
 }
 
 switch ($Action.ToLowerInvariant()) {
@@ -335,8 +387,12 @@ switch ($Action.ToLowerInvariant()) {
       exit 0
     }
     if (-not $Quiet) { Write-Host "Starting rwkv_lighting_cuda.exe in background (log: $OutLog)..." -ForegroundColor Cyan }
-    $Exe = Join-Path $Conf.installDir "bundle\rwkv_lighting_cuda.exe"
-    $SessionDb = Join-Path $Conf.installDir "data\rwkv_sessions.db"
+    $BundleDir = Join-Path $Conf.installDir "bundle"
+    $DataDir = Join-Path $Conf.installDir "data"
+    New-Item -ItemType Directory -Force -Path $DataDir, (Join-Path $Conf.installDir "logs") | Out-Null
+    $env:PATH = "$BundleDir;$env:PATH"
+    $Exe = Join-Path $BundleDir "rwkv_lighting_cuda.exe"
+    $SessionDb = Join-Path $DataDir "rwkv_sessions.db"
     $ArgsList = @(
       "--model-path", "`"$($Conf.modelPath)`"",
       "--vocab-path", "`"$($Conf.vocabPath)`"",
@@ -351,7 +407,7 @@ switch ($Action.ToLowerInvariant()) {
       "--password", "`"$($Conf.apiKey)`""
     )
     $Proc = Start-Process -FilePath $Exe -ArgumentList $ArgsList `
-      -WorkingDirectory (Join-Path $Conf.installDir "bundle") `
+      -WorkingDirectory $DataDir `
       -WindowStyle Hidden -RedirectStandardOutput $OutLog -RedirectStandardError $ErrLog -PassThru
     Set-Content -Path $PidFile -Value "$($Proc.Id)" -Encoding Ascii
     for ($i = 0; $i -lt 90; $i++) {
@@ -410,7 +466,13 @@ switch ($Action.ToLowerInvariant()) {
     if (-not $Arg2) {
       throw "Usage: rwkv-engine set-deepseek <DEEPSEEK_API_KEY>"
     }
-    & node -e "const fs=require('node:fs'); const [f,k]=process.argv.slice(1); let t=fs.existsSync(f)?fs.readFileSync(f,'utf8'):''; const up=(s,n,v)=>{const r=new RegExp('^'+n+'=.*$','m'); return r.test(s)?s.replace(r,n+'='+v):s.trimEnd()+'\n'+n+'='+v+'\n';}; t=up(t,'DEEPSEEK_API_KEY',k); t=up(t,'RWKV_WEB_API_KEY',k); fs.writeFileSync(f,t,'utf8');" $EnvFile $Arg2
+    $prev = $ErrorActionPreference
+    $ErrorActionPreference = "Continue"
+    try {
+      & node -e "const fs=require('node:fs'); const [f,k]=process.argv.slice(1); let t=fs.existsSync(f)?fs.readFileSync(f,'utf8'):''; const up=(s,n,v)=>{const r=new RegExp('^'+n+'=.*$','m'); return r.test(s)?s.replace(r,n+'='+v):s.trimEnd()+'\n'+n+'='+v+'\n';}; t=up(t,'DEEPSEEK_API_KEY',k); t=up(t,'RWKV_WEB_API_KEY',k); fs.writeFileSync(f,t,'utf8');" $EnvFile $Arg2
+    } finally {
+      $ErrorActionPreference = $prev
+    }
     Write-Host "Saved DEEPSEEK_API_KEY to $EnvFile (web_search, web_fetch, and /rwkv-subagent are now enabled)." -ForegroundColor Green
   }
   default {
@@ -473,6 +535,18 @@ $env:NO_PROXY = "127.0.0.1,localhost"
 $env:no_proxy = "127.0.0.1,localhost"
 $EnvFile = Join-Path $Conf.installDir "rwkv-pi\.env"
 
+# Ensure our bin\ (python3 shim) and Git for Windows's bin\bash.exe (even on non-C: drives) precede System32\bash.exe (WSL) and WindowsApps.
+$ExtraPaths = @($PSScriptRoot)
+$gitCmd = Get-Command git.exe -ErrorAction SilentlyContinue
+if ($gitCmd) {
+  $gitRoot = Split-Path -Parent (Split-Path -Parent $gitCmd.Source)
+  foreach ($sub in @("bin", "usr\bin")) {
+    $cand = Join-Path $gitRoot $sub
+    if (Test-Path $cand) { $ExtraPaths += $cand }
+  }
+}
+$env:PATH = ($ExtraPaths -join ";") + ";" + $env:PATH
+
 # Load optional per-directory .rwkv-pi.env (e.g. demos\04-python-web-research)
 if (Test-Path ".\.rwkv-pi.env") {
   foreach ($ln in (Get-Content ".\.rwkv-pi.env")) {
@@ -518,10 +592,16 @@ if (-not $SkipEngine) {
   & (Join-Path $PSScriptRoot "rwkv-engine.ps1") -Action start -Quiet
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   $curlExe = "$env:SystemRoot\System32\curl.exe"
-  $raw = & $curlExe --noproxy "*" -fsS --max-time 3 -H "Authorization: Bearer $($Conf.apiKey)" "http://$($Conf.host):$($Conf.port)/v1/models" 2>$null
+  $prev = $ErrorActionPreference
+  $ErrorActionPreference = "SilentlyContinue"
+  try {
+    $raw = & $curlExe --noproxy "*" -fs --max-time 3 -H "Authorization: Bearer $($Conf.apiKey)" "http://$($Conf.host):$($Conf.port)/v1/models" 2>$null
+  } finally {
+    $ErrorActionPreference = $prev
+  }
   if ($raw) {
     try {
-      $j = $raw | ConvertFrom-Json
+      $j = ($raw -join "`n") | ConvertFrom-Json
       if ($j.data -and $j.data.Count -gt 0 -and $j.data[0].id) {
         $env:RWKV_MODEL = $j.data[0].id
       }
@@ -530,20 +610,29 @@ if (-not $SkipEngine) {
 }
 
 $CliJs = Join-Path $Conf.installDir "rwkv-pi\dist\cli.js"
-& node "--env-file=$EnvFile" $CliJs @args
-exit $LASTEXITCODE
+$prev = $ErrorActionPreference
+$ErrorActionPreference = "Continue"
+try {
+  & node "--env-file=$EnvFile" $CliJs @args
+  $rc = $LASTEXITCODE
+} finally {
+  $ErrorActionPreference = $prev
+}
+exit $rc
 '@
 Set-Content -Path (Join-Path $InstallDir "bin\pi.ps1") -Value $PiPs1 -Encoding Ascii
 Set-Content -Path (Join-Path $InstallDir "bin\pi.cmd") -Value "@echo off`r`npowershell -NoProfile -ExecutionPolicy Bypass -File `"%~dp0pi.ps1`" %*`r`n" -Encoding Ascii
 
 $BinDir = Join-Path $InstallDir "bin"
-$UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
-if (-not $UserPath) { $UserPath = "" }
-$PathItems = $UserPath -split ";" | Where-Object { $_ -ne "" }
-if ($PathItems -notcontains $BinDir) {
-  $NewUserPath = (@($BinDir) + $PathItems) -join ";"
-  [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
-  Write-Host "    Added $BinDir to Windows User PATH."
+if (-not $SkipUserPath) {
+  $UserPath = [Environment]::GetEnvironmentVariable("Path", "User")
+  if (-not $UserPath) { $UserPath = "" }
+  $PathItems = $UserPath -split ";" | Where-Object { $_ -ne "" }
+  if ($PathItems -notcontains $BinDir) {
+    $NewUserPath = (@($BinDir) + $PathItems) -join ";"
+    [Environment]::SetEnvironmentVariable("Path", $NewUserPath, "User")
+    Write-Host "    Added $BinDir to Windows User PATH."
+  }
 }
 if (($env:PATH -split ";") -notcontains $BinDir) {
   $env:PATH = "$BinDir;$env:PATH"
@@ -566,7 +655,7 @@ Write-Host "  Config (.env): $EnvPath"
 Write-Host "  Engine API   : http://127.0.0.1:$Port/v1"
 Write-Host ""
 Write-Host "  Next (works in this window and any new one):"
-Write-Host "       cd `"$InstallDir\demos\01-portal-security`"; pi"
+Write-Host "       cd `"$InstallDir\demos\06-textindex`"; pi"
 Write-Host ""
 Write-Host "  Optional DeepSeek key (web_search + /rwkv-subagent):"
 Write-Host "       rwkv-engine set-deepseek <DEEPSEEK_API_KEY>"
