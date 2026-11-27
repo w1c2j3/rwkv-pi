@@ -30,6 +30,13 @@ function sanitizeRwkvPayload(payload: Record<string, unknown>): Record<string, u
     }
   };
   const withHints = raw.map((msg, idx) => {
+    if (msg?.role === "system" && typeof msg.content === "string" && /[A-Za-z]:\\/.test(msg.content)) {
+      const normalized = msg.content.replace(/[A-Za-z]:\\[^\s<>"'`)]+/g, (m: string) => m.replaceAll("\\", "/"));
+      if (normalized !== msg.content) {
+        mutated = true;
+        return { ...msg, content: normalized };
+      }
+    }
     if (msg?.role !== "tool" || typeof msg.tool_call_id !== "string") return msg;
     const text = typeof msg.content === "string"
       ? msg.content
@@ -55,7 +62,7 @@ function sanitizeRwkvPayload(payload: Record<string, unknown>): Record<string, u
     }
     return msg;
   });
-  if (clearAssistantIndices.size === 0) return payload;
+  if (clearAssistantIndices.size === 0) return mutated ? { ...payload, messages: withHints } : payload;
   const next = withHints.map((msg, idx) => {
     if (!clearAssistantIndices.has(idx)) return msg;
     if (!msg.reasoning_content && !msg.reasoning) return msg;

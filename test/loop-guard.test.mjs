@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { repeatedIdenticalCall, repeatedToolFailure } from "../dist/loop-guard.js";
 import { readConfig } from "../dist/config.js";
+import { withRwkvTransport } from "../dist/transport.js";
 
 const failedTurn = (id, args = { path: "/project" }, text = "EISDIR: illegal operation on a directory, read", isError = true) => [
   { role: "assistant", stopReason: "toolUse", content: [
@@ -82,4 +83,29 @@ test("repeatedIdenticalCall blocks period-2 ping-pong loops (including mixed ok/
   ];
   assert.equal(repeatedIdenticalCall(twoFails.slice(0, 2), "edit", { path: "a.py", oldText: "same", newText: "same" }, 2), undefined);
   assert.match(repeatedIdenticalCall(twoFails, "edit", { path: "a.py", oldText: "same", newText: "same" }, 2), /RWKV_REPEAT_GUARD: edit 已连续 2 次以完全相同的参数返回相同错误/);
+});
+
+test("withRwkvTransport normalizes Windows drive-letter backslash paths inside system messages", async () => {
+  let seenMessages = null;
+  const fakeApi = {
+    stream(_model, _context, options) {
+      return options.onPayload({
+        messages: [
+          {
+            role: "system",
+            content: "<docs>\n- Main documentation: D:\\rwkv-agent\\rwkv-pi\\node_modules\\@earendil-works\\pi-coding-agent\\README.md\n</docs>",
+          },
+          { role: "user", content: "Keep C:\\raw\\user\\text as-is." },
+        ],
+      }, _model);
+    },
+    streamSimple() {},
+  };
+  const wrapped = withRwkvTransport(fakeApi, 3, undefined, (msgs) => { seenMessages = msgs; });
+  await wrapped.stream({}, { messages: [] }, {});
+  assert.equal(
+    seenMessages[0].content,
+    "<docs>\n- Main documentation: D:/rwkv-agent/rwkv-pi/node_modules/@earendil-works/pi-coding-agent/README.md\n</docs>",
+  );
+  assert.equal(seenMessages[1].content, "Keep C:\\raw\\user\\text as-is.");
 });
