@@ -30,6 +30,8 @@ param(
 $ErrorActionPreference = "Stop"
 $EngineVersion = "v1.8.15"
 $HfEndpoint = $HfEndpoint.TrimEnd("/")
+$NpmRegistry = if ($HfEndpoint -like "*huggingface.co*") { "https://registry.npmjs.org" } else { "https://registry.npmmirror.com" }
+$env:GIT_TERMINAL_PROMPT = "0"
 
 function Assert-Command([string]$Name, [string]$Hint) {
   if (-not (Get-Command $Name -ErrorAction SilentlyContinue)) {
@@ -221,12 +223,15 @@ if (-not (Test-Path (Join-Path $InstallDir "demos\.templates"))) {
 Write-Host "==> [5/6] Installing and building rwkv-pi client..." -ForegroundColor Cyan
 $PiDir = Join-Path $InstallDir "rwkv-pi"
 if (-not (Test-Path (Join-Path $PiDir ".git"))) {
-  & git clone $PiRepo $PiDir
+  & git clone --depth 1 $PiRepo $PiDir
   if ($LASTEXITCODE -ne 0) { throw "[ERROR] git clone failed for $PiRepo" }
+} else {
+  & git -C $PiDir pull --ff-only
+  if ($LASTEXITCODE -ne 0) { Write-Host "    [WARN] Could not update rwkv-pi; keeping the existing copy." -ForegroundColor Yellow }
 }
 Push-Location $PiDir
 try {
-  & npm.cmd ci --no-audit --no-fund
+  & npm.cmd ci --no-audit --no-fund --registry $NpmRegistry
   if ($LASTEXITCODE -ne 0) { throw "[ERROR] npm ci failed inside $PiDir" }
 } finally {
   Pop-Location

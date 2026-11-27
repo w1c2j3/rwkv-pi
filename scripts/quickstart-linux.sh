@@ -35,6 +35,7 @@ CUDA_VER="${RWKV_CUDA_VER:-12.9}"
 DEEPSEEK_KEY="${DEEPSEEK_API_KEY:-}"
 HF_ENDPOINT="${HF_ENDPOINT:-https://hf-mirror.com}"
 NODE_MIRROR="${NODE_MIRROR:-https://npmmirror.com/mirrors/node}"
+NPM_REGISTRY="${NPM_REGISTRY:-https://registry.npmmirror.com}"
 PORT="${RWKV_PORT:-8000}"
 API_KEY="${RWKV_API_KEY:-rwkv-local}"
 PI_REPO="${RWKV_PI_REPO:-https://github.com/w1c2j3/rwkv-pi.git}"
@@ -48,7 +49,7 @@ while [ $# -gt 0 ]; do
     --cuda) CUDA_VER="$2"; shift 2 ;;
     --deepseek-key) DEEPSEEK_KEY="$2"; shift 2 ;;
     --hf-endpoint) HF_ENDPOINT="${2%/}"; shift 2 ;;
-    --official-hf) HF_ENDPOINT="https://huggingface.co"; NODE_MIRROR="https://nodejs.org/dist"; shift ;;
+    --official-hf) HF_ENDPOINT="https://huggingface.co"; NODE_MIRROR="https://nodejs.org/dist"; NPM_REGISTRY="https://registry.npmjs.org"; shift ;;
     --port) PORT="$2"; shift 2 ;;
     --api-key) API_KEY="$2"; shift 2 ;;
     --install-only) INSTALL_ONLY=1; shift ;;
@@ -208,9 +209,11 @@ fi
 
 echo "==> [5/6] Installing and building rwkv-pi client..."
 if [ ! -d "$INSTALL_DIR/rwkv-pi/.git" ]; then
-  git clone "$PI_REPO" "$INSTALL_DIR/rwkv-pi"
+  GIT_TERMINAL_PROMPT=0 git clone --depth 1 "$PI_REPO" "$INSTALL_DIR/rwkv-pi"
+else
+  GIT_TERMINAL_PROMPT=0 git -C "$INSTALL_DIR/rwkv-pi" pull --ff-only || echo "    [WARN] Could not update rwkv-pi; keeping the existing copy."
 fi
-(cd "$INSTALL_DIR/rwkv-pi" && npm ci --no-audit --no-fund)
+(cd "$INSTALL_DIR/rwkv-pi" && npm ci --no-audit --no-fund --registry "$NPM_REGISTRY")
 
 # Preserve existing DEEPSEEK_API_KEY in .env if re-running without --deepseek-key
 if [ -z "$DEEPSEEK_KEY" ] && [ -f "$INSTALL_DIR/rwkv-pi/.env" ]; then
