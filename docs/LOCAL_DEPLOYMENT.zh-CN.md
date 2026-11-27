@@ -14,6 +14,9 @@
 > [!TIP]
 > 安装前先关闭游戏、浏览器等占用显存的程序，避免误判。
 
+> [!NOTE]
+> W8A16 量化版相比 BF16 原版存在一定能力损失，复杂任务的成功率会略低。显存允许时建议使用 BF16（`--precision bf16` / `RWKV_PRECISION=bf16`）。
+
 ---
 
 ## 一、安装
@@ -142,7 +145,7 @@ rwkv-engine set-deepseek <你的 DeepSeek API Key>
 - [rwkv_lightning_cuda](https://github.com/Alic-Li/rwkv_lightning_cuda)：引擎与工具总览（[NoRA](https://github.com/Alic-Li/rwkv_lightning_cuda/blob/main/src/nora/README.md) / [MiSS](https://github.com/Alic-Li/rwkv_lightning_cuda/blob/main/src/miss/README.zh-CN.md) 训练、[适配器合并](https://github.com/Alic-Li/rwkv_lightning_cuda/blob/main/docs/peft-weight-merge.zh-CN.md)）
 - [rwkv-pi](https://github.com/w1c2j3/rwkv-pi)：提示模板与数据管线（训练数据需与 `pi` 的提示模板一致）
 
-量化：`bundle/rwkv_quantize --format w8a16 <输入.pth> <输出.rwkvq>`。换模型后修改 `engine.conf` / `engine.json` 中的模型路径，再 `rwkv-engine restart`。
+量化：`bundle/rwkv_quantize --format w8a16 <输入.pth> <输出.rwkvq>`（量化后会有一定能力损失）。换模型后修改 `engine.conf` / `engine.json` 中的模型路径，再 `rwkv-engine restart`。
 
 > [!NOTE]
 > 仓库中保留了旧版 `RWKV7-Pi-7.2B-v0.1-final`，它使用旧编辑协议，需在 `.env` 中设置 `RWKV_EDIT_MODE=text`。
