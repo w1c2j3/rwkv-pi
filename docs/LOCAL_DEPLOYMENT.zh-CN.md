@@ -225,23 +225,87 @@ QA 报了一个回归问题：运行 python3 -m unittest discover -s tests 时�
 
 ---
 
-## 六、进阶：量化自己的权重
+## 六、进阶：退火训练与量化
 
-如果你微调了自己的 `.pth` 权重，可以用引擎自带的工具导出 W8A16 量化文件，约 1–2 分钟，不需要校准数据。
+一键安装的引擎包里已经带了训练、合并和量化工具（位于安装目录的 `bundle/` 下），不需要另外编译：
 
-Linux：
+| 工具 | 用途 |
+| :--- | :--- |
+| `rwkv_nora_tune` / `rwkv_miss_tune` | 在 BF16 基模上训练 NoRA / MiSS 低秩适配器（退火、领域微调） |
+| `rwkv_peft_weight_merge` | 把训练好的适配器合并回基模，得到新的 `.pth` |
+| `rwkv_quantize` | 把 `.pth` 量化为 W8A16 `.rwkvq`，供 12–16 GB 显卡部署 |
+
+以下命令以 Linux 为例；Windows 上对应的是同名 `.exe`。
+
+### 1. 下载基模权重
+
+训练必须使用 **BF16 `.pth`**，不能使用量化后的 `.rwkvq`。
+
+| 你的目标 | 下载哪个文件 |
+| :--- | :--- |
+| 在 Pi 编程 Agent 上继续退火（推荐） | `RWKV7-Pi-7.2B-v0.2.pth` |
+| 从通用 Agent 底座训练自己的方向 | `RWKV7-Agent-7.2B-v0.1.pth` |
 
 ```bash
-~/rwkv-agent/bundle/rwkv_quantize ./my-model.pth ./my-model.w8a16.rwkvq
+pip install -U huggingface_hub
+HF_ENDPOINT=https://hf-mirror.com hf download RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource \
+  RWKV7-Pi-7.2B-v0.2.pth --local-dir ~/rwkv-agent/train
 ```
 
-Windows：
+### 2. 需要阅读的文档
 
-```powershell
-& $HOME\rwkv-agent\bundle\rwkv_quantize.exe .\my-model.pth .\my-model.w8a16.rwkvq
+| 文档 | 内容 |
+| :--- | :--- |
+| [NoRA 训练说明](https://github.com/Alic-Li/rwkv_lightning_cuda/blob/main/src/nora/README.md) | NoRA 参数、检查点与续训 |
+| [MiSS 训练说明](https://github.com/Alic-Li/rwkv_lightning_cuda/blob/main/src/miss/README.zh-CN.md) | JSONL 数据格式、全部训练参数 |
+| `bundle/docs/peft-weight-merge.zh-CN.md`（随引擎附带） | 适配器合并工具用法 |
+| [rwkv-pi README](https://github.com/w1c2j3/rwkv-pi#readme) 与 [data_pipeline/README.md](https://github.com/w1c2j3/rwkv-pi/blob/main/data_pipeline/README.md) | 训练数据如何用和线上一致的提示模板渲染 |
+
+> [!IMPORTANT]
+> 训练数据要用 rwkv-pi 同一套提示模板渲染，编辑工具也要用 line 格式（与 `RWKV_EDIT_MODE=line` 一致）。否则训练出的模型和 `pi` 实际发送的提示对不上，效果会明显变差。
+
+### 3. 训练 → 合并 → 量化 → 部署
+
+**① 准备数据**：JSONL 每行一条样本，`train: true` 的片段计算损失，`false` 的片段只作为上下文：
+
+```json
+{"segments":[{"text":"<系统提示与用户问题>","train":false},{"text":"<期望的模型回复与工具调用>","train":true}]}
 ```
 
-导出后，把安装目录下 `engine.conf`（Linux）或 `engine.json`（Windows）中的模型路径改为新文件，再执行 `rwkv-engine restart`。
+**② 训练 NoRA 适配器**：
+
+```bash
+cd ~/rwkv-agent
+LD_LIBRARY_PATH=bundle/lib bundle/rwkv_nora_tune \
+  --model train/RWKV7-Pi-7.2B-v0.2.pth \
+  --vocab bundle/rwkv_vocab_v20230424.txt \
+  --data train/my-data.jsonl \
+  --output train/nora-r16 \
+  --targets all --ctx 8192 --chunk 4096 --wkv_tape \
+  --batch-size 8 --warmup-steps 10 \
+  --rank 16 --alpha 16 --lr 0.00002 --lr-final 0.000002 --epochs 2
+```
+
+显存占用随 `--ctx` 和 `--rank` 变化，建议先用小数据、小 `--ctx` 试跑。完成后会生成 `train/nora-r16/adapter-final.pth`；中断后可以用 `--resume checkpoint-N` 续训。
+
+**③ 合并回基模**：
+
+```bash
+LD_LIBRARY_PATH=bundle/lib bundle/rwkv_peft_weight_merge --method nora \
+  --model train/RWKV7-Pi-7.2B-v0.2.pth \
+  --adapter train/nora-r16/adapter-final.pth \
+  --output train/my-model.pth --threads 16
+```
+
+**④ 量化**（显存在 16 GB 以下才需要；直接用 BF16 `.pth` 可跳过这一步）：
+
+```bash
+LD_LIBRARY_PATH=bundle/lib bundle/rwkv_quantize --format w8a16 train/my-model.pth models/my-model.w8a16.rwkvq
+```
+
+量化约 1–2 分钟，不需要校准数据。如果你只想量化现成的 `.pth`，直接执行这一步即可。
+
+**⑤ 部署**：把 `engine.conf`（Linux）或 `engine.json`（Windows）里的模型路径改为新文件，然后执行 `rwkv-engine restart`。之后运行 `pi` 时，模型 ID 会自动对齐。
 
 > [!NOTE]
 > HF 仓库里仍保留旧版 `RWKV7-Pi-7.2B-v0.1-final`。它使用旧的编辑协议，如果要用它，需要在 `.env` 中改为 `RWKV_EDIT_MODE=text`。新安装默认使用 `v0.2`，不需要改动。
