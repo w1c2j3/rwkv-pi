@@ -297,6 +297,8 @@ case "$cmd" in
     [ "$arg2" = "--quiet" ] || echo "Starting rwkv_lighting_cuda in background (log: $LOG_FILE)..."
     mkdir -p "$INSTALL_DIR/logs"
     export LD_LIBRARY_PATH="$INSTALL_DIR/bundle/lib:${LD_LIBRARY_PATH:-}"
+    # Run from data/ so the engine's ./uploads scratch dir never lands in the user's project.
+    cd "$INSTALL_DIR/data"
     nohup "$INSTALL_DIR/bundle/rwkv_lighting_cuda" \
       --model-path "$MODEL_PATH" \
       --vocab-path "$VOCAB_PATH" \
