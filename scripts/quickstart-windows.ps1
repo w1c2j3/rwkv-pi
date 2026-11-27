@@ -3,20 +3,20 @@
   RWKV-Pi One-Command Local Deployment & Launcher Setup for Native Windows (PowerShell 5.1 / 7+)
 
 .DESCRIPTION
-  Downloads prebuilt rwkv_lightning_cuda Windows x64 binaries, downloads & verifies RWKV-7 7.2B
-  model weights and built-in real-world demo projects from Hugging Face (defaulting to hf-mirror.com),
-  builds rwkv-pi, and registers `pi`, `rwkv-engine`, and `rwkv-demos` into your Windows User PATH.
+  Installs missing Node.js / Git / Python via winget, downloads prebuilt rwkv_lightning_cuda
+  Windows x64 binaries, downloads & verifies RWKV-7 7.2B weights (auto-selected by GPU memory)
+  and the built-in demo projects from Hugging Face (default: hf-mirror.com), builds rwkv-pi,
+  and registers `pi`, `rwkv-engine`, and `rwkv-demos` into your Windows User PATH.
 
 .EXAMPLE
-  .\quickstart-windows.ps1
-  .\quickstart-windows.ps1 -InstallDir "D:\rwkv-agent" -DeepSeekKey "sk-xxxx"
-  .\quickstart-windows.ps1 -Precision bf16 -Cuda 13.2
+  irm https://hf-mirror.com/RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource/resolve/main/quickstart-windows.ps1 | iex
+  & ([scriptblock]::Create((irm <url>))) -InstallDir "D:\rwkv-agent" -Precision bf16
 #>
 [CmdletBinding()]
 param(
   [string]$InstallDir = "$HOME\rwkv-agent",
-  [ValidateSet("w8a16", "bf16")]
-  [string]$Precision = "w8a16",
+  [ValidateSet("auto", "w8a16", "bf16")]
+  [string]$Precision = "auto",
   [ValidateSet("12.9", "13.2")]
   [string]$Cuda = "12.9",
   [string]$DeepSeekKey = "",
@@ -55,15 +55,71 @@ function Download-Resumable([string]$Url, [string]$Dest) {
   Invoke-WebRequest -UseBasicParsing -Uri $Url -OutFile $Dest -Headers @{ "User-Agent" = "curl/8.5" }
 }
 
-Write-Host "==> [1/6] Checking Windows prerequisites..." -ForegroundColor Cyan
-Assert-Command "git" "Install via PowerShell: winget install --id Git.Git -e"
-Assert-Command "node" "Install Node.js >= 22.19 via PowerShell: winget install --id OpenJS.NodeJS.LTS -e"
-Assert-Command "npm.cmd" "npm comes bundled with Node.js"
+function Update-SessionPath {
+  $machine = [Environment]::GetEnvironmentVariable("Path", "Machine")
+  $user = [Environment]::GetEnvironmentVariable("Path", "User")
+  $env:Path = "$machine;$user;$env:Path"
+}
 
-& node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>22||(a===22&&b>=19)?0:1)"
-if ($LASTEXITCODE -ne 0) {
-  $nv = (& node -v)
-  throw "[ERROR] Node.js >= 22.19.0 is required, found $nv. Upgrade via: winget install --id OpenJS.NodeJS.LTS -e"
+function Invoke-Winget([string]$Verb, [string]$Id, [string]$Label) {
+  if (-not (Get-Command winget -ErrorAction SilentlyContinue)) {
+    throw "[ERROR] $Label is missing and winget is unavailable. Install $Label manually, then re-run."
+  }
+  Write-Host "    $Verb $Label via winget ($Id)..."
+  & winget $Verb --id $Id -e --silent --accept-source-agreements --accept-package-agreements
+  Update-SessionPath
+}
+
+function Test-NodeOk {
+  if (-not (Get-Command node -ErrorAction SilentlyContinue)) { return $false }
+  & node -e "const [a,b]=process.versions.node.split('.').map(Number); process.exit(a>22||(a===22&&b>=19)?0:1)"
+  return ($LASTEXITCODE -eq 0)
+}
+
+function Test-PythonOk {
+  $py = Get-Command python -ErrorAction SilentlyContinue
+  return ($py -and $py.Source -notlike "*\WindowsApps\*")
+}
+
+Write-Host "==> [1/6] Checking prerequisites (Node.js, Git, Python)..." -ForegroundColor Cyan
+if (-not (Test-NodeOk)) {
+  $verb = if (Get-Command node -ErrorAction SilentlyContinue) { "upgrade" } else { "install" }
+  Invoke-Winget $verb "OpenJS.NodeJS.LTS" "Node.js LTS"
+  if (-not (Test-NodeOk)) { throw "[ERROR] Node.js >= 22.19 is still unavailable. Install it from https://nodejs.org and re-run." }
+}
+if (-not (Get-Command git -ErrorAction SilentlyContinue)) {
+  Invoke-Winget "install" "Git.Git" "Git (includes Git Bash used by pi)"
+  Assert-Command "git" "Install Git from https://git-scm.com and re-run."
+}
+if (-not (Test-PythonOk)) {
+  try { Invoke-Winget "install" "Python.Python.3.12" "Python 3.12 (for the Python demos)" } catch {}
+  if (-not (Test-PythonOk)) { Write-Host "    [WARN] Python not found; Python-based demos will not run." -ForegroundColor Yellow }
+}
+Assert-Command "npm.cmd" "npm comes bundled with Node.js"
+Write-Host "    node $(& node -v), $(& git --version)"
+
+# Pick weights by FREE memory on GPU 0 (the engine's device): BF16 needs ~14.2 GB, W8A16 ~8.5 GB.
+$VramFree = $null
+$smi = Get-Command nvidia-smi -ErrorAction SilentlyContinue
+if ($smi) {
+  $gpuInfo = (& $smi.Source --id=0 --query-gpu=memory.total,memory.free --format=csv,noheader,nounits 2>$null | Select-Object -First 1)
+  if ($gpuInfo) {
+    $parts = "$gpuInfo".Split(",")
+    $VramTotal = [int]$parts[0].Trim()
+    $VramFree = [int]$parts[1].Trim()
+    Write-Host "    GPU 0 memory: $VramFree MiB free / $VramTotal MiB total"
+  }
+}
+if ($null -eq $VramFree) {
+  Write-Host "    [WARN] nvidia-smi not found; make sure an NVIDIA driver with CUDA $Cuda support is installed." -ForegroundColor Yellow
+}
+if ($Precision -eq "auto") {
+  $Precision = if ($null -ne $VramFree -and $VramFree -ge 16000) { "bf16" } else { "w8a16" }
+  Write-Host "    Auto-selected precision: $Precision"
+}
+$NeedMib = if ($Precision -eq "bf16") { 16000 } else { 9000 }
+if ($null -ne $VramFree -and $VramFree -lt $NeedMib) {
+  Write-Host "    [WARN] $Precision needs ~$($NeedMib / 1000) GB free VRAM; close other GPU apps before running pi." -ForegroundColor Yellow
 }
 
 $InstallDir = [System.IO.Path]::GetFullPath($InstallDir)
@@ -71,43 +127,46 @@ foreach ($sub in @("models", "bin", "logs", "data")) {
   New-Item -ItemType Directory -Force -Path (Join-Path $InstallDir $sub) | Out-Null
 }
 
+$HfRepo = "RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource"
+$HfBase = "$HfEndpoint/$HfRepo/resolve/main"
+$SumsPath = Join-Path $InstallDir "models\SHA256SUMS.txt"
+Download-Resumable "$HfBase/SHA256SUMS.txt" $SumsPath
+$Sums = @{}
+foreach ($line in (Get-Content $SumsPath)) {
+  $parts = $line.Trim() -split "\s+"
+  if ($parts.Count -ge 2) { $Sums[$parts[1].TrimStart("*")] = $parts[0].ToLowerInvariant() }
+}
+function Test-Sha([string]$Path, [string]$Expected) {
+  (Test-Path $Path) -and ((Get-FileHash -Algorithm SHA256 -Path $Path).Hash.ToLowerInvariant() -eq $Expected)
+}
+
 Write-Host "==> [2/6] Preparing rwkv_lightning_cuda ($EngineVersion, Windows x64 CUDA $Cuda)..." -ForegroundColor Cyan
 $EngineZip = "rwkv-lightning-$EngineVersion-windows-x64-cuda$Cuda.zip"
-$EngineUrl = "https://github.com/Alic-Li/rwkv_lightning_cuda/releases/download/$EngineVersion/$EngineZip"
 $EngineExe = Join-Path $InstallDir "bundle\rwkv_lighting_cuda.exe"
 $VocabPath = Join-Path $InstallDir "bundle\rwkv_vocab_v20230424.txt"
 
 if ((Test-Path $EngineExe) -and (Test-Path $VocabPath)) {
   Write-Host "    Found existing engine bundle at $InstallDir\bundle, skipping download."
 } else {
-  $ShaFile = Join-Path $InstallDir "$EngineZip.sha256"
+  $ExpectedEngineSha = $Sums["engine/$EngineZip"]
+  if (-not $ExpectedEngineSha) { throw "[ERROR] Checksum for engine/$EngineZip not found in SHA256SUMS.txt" }
   $ZipPath = Join-Path $InstallDir $EngineZip
-  Download-Resumable "$EngineUrl.sha256" $ShaFile
-  $ExpectedEngineSha = ((Get-Content $ShaFile -Raw).Trim() -split "\s+")[0].ToLowerInvariant()
-
-  $NeedDownload = $true
-  if (Test-Path $ZipPath) {
-    $ActualSha = (Get-FileHash -Algorithm SHA256 -Path $ZipPath).Hash.ToLowerInvariant()
-    if ($ActualSha -eq $ExpectedEngineSha) { $NeedDownload = $false }
-    else { Remove-Item -Force $ZipPath }
-  }
-  if ($NeedDownload) {
-    Download-Resumable $EngineUrl $ZipPath
-    $ActualSha = (Get-FileHash -Algorithm SHA256 -Path $ZipPath).Hash.ToLowerInvariant()
-    if ($ActualSha -ne $ExpectedEngineSha) {
-      throw "[ERROR] Engine archive SHA-256 mismatch (expected $ExpectedEngineSha, got $ActualSha)"
+  if (-not (Test-Sha $ZipPath $ExpectedEngineSha)) {
+    Download-Resumable "$HfBase/engine/$EngineZip" $ZipPath
+    if (-not (Test-Sha $ZipPath $ExpectedEngineSha)) {
+      throw "[ERROR] Engine archive checksum mismatch; delete $ZipPath and re-run."
     }
   }
   if (Test-Path (Join-Path $InstallDir "bundle")) {
     Remove-Item -Recurse -Force (Join-Path $InstallDir "bundle")
   }
   Expand-Archive -Path $ZipPath -DestinationPath $InstallDir -Force
+  Remove-Item -Force $ZipPath
 }
 & $EngineExe --version
 if ($LASTEXITCODE -ne 0) { throw "[ERROR] rwkv_lighting_cuda.exe --version failed." }
 
 Write-Host "==> [3/6] Preparing RWKV-7 7.2B model weights ($Precision)..." -ForegroundColor Cyan
-$HfRepo = "RWKV-Agent-Lab/RWKV7-Agent-7.2B-OpenSource"
 if ($Precision -eq "w8a16") {
   $ModelFile = "RWKV7-Pi-7.2B-v0.1-final.w8a16.rwkvq"
   $DecodeBatch = 4
@@ -118,17 +177,7 @@ if ($Precision -eq "w8a16") {
   $ChunkSize = 1024
 }
 $ModelPath = Join-Path $InstallDir "models\$ModelFile"
-$SumsPath = Join-Path $InstallDir "models\SHA256SUMS.txt"
-
-Download-Resumable "$HfEndpoint/$HfRepo/resolve/main/SHA256SUMS.txt" $SumsPath
-$ExpectedModelSha = $null
-foreach ($line in (Get-Content $SumsPath)) {
-  $parts = $line.Trim() -split "\s+"
-  if ($parts.Count -ge 2) {
-    $fn = $parts[1].TrimStart("*")
-    if ($fn -eq $ModelFile) { $ExpectedModelSha = $parts[0].ToLowerInvariant(); break }
-  }
-}
+$ExpectedModelSha = $Sums[$ModelFile]
 if (-not $ExpectedModelSha) {
   throw "[ERROR] Checksum for $ModelFile not found in SHA256SUMS.txt"
 }
@@ -498,22 +547,17 @@ if (-not $InstallOnly) {
 
 Write-Host ""
 Write-Host "============================================================" -ForegroundColor Green
-Write-Host "  RWKV-Pi Local Deployment Ready! (Native Windows x64)" -ForegroundColor Green
+Write-Host "  RWKV-Pi is ready (Windows x64)" -ForegroundColor Green
 Write-Host "============================================================" -ForegroundColor Green
 Write-Host "  Install root : $InstallDir"
-Write-Host "  Demos suite  : $InstallDir\demos  (reset via: rwkv-demos reset)"
-Write-Host "  Config (.env): $EnvPath"
 Write-Host "  Model        : $ModelFile"
+Write-Host "  Config (.env): $EnvPath"
 Write-Host "  Engine API   : http://127.0.0.1:$Port/v1"
 Write-Host ""
-Write-Host "  1) Optional: Configure DeepSeek API Key (for web_search & /rwkv-subagent):"
-Write-Host "       rwkv-engine set-deepseek sk-your-deepseek-key"
+Write-Host "  Next (works in this window and any new one):"
+Write-Host "       cd `"$InstallDir\demos\01-portal-security`"; pi"
 Write-Host ""
-Write-Host "  2) Run Pi in built-in real-world demos or ANY project folder:"
-Write-Host "       cd `"$InstallDir\demos\01-portal-security`""
-Write-Host "       pi"
-Write-Host ""
-Write-Host "  3) Manage background GPU engine & demos:"
-Write-Host "       rwkv-engine status | logs | stop"
-Write-Host "       rwkv-demos list | reset"
+Write-Host "  Optional DeepSeek key (web_search + /rwkv-subagent):"
+Write-Host "       rwkv-engine set-deepseek <DEEPSEEK_API_KEY>"
+Write-Host "  Manage: rwkv-engine status|logs|stop   rwkv-demos list|reset"
 Write-Host "============================================================" -ForegroundColor Green
