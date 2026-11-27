@@ -227,7 +227,7 @@ QA 报了一个回归问题：运行 python3 -m unittest discover -s tests 时�
 
 ## 六、进阶：量化自己的权重
 
-如果你微调了自己的 `.pth` 权重，可以用引擎自带的工具导出 W8A16 量化文件，约 15 秒，不需要校准数据。
+如果你微调了自己的 `.pth` 权重，可以用引擎自带的工具导出 W8A16 量化文件，约 1–2 分钟，不需要校准数据。
 
 Linux：
 
@@ -242,3 +242,6 @@ Windows：
 ```
 
 导出后，把安装目录下 `engine.conf`（Linux）或 `engine.json`（Windows）中的模型路径改为新文件，再执行 `rwkv-engine restart`。
+
+> [!NOTE]
+> HF 仓库里仍保留旧版 `RWKV7-Pi-7.2B-v0.1-final`。它使用旧的编辑协议，如果要用它，需要在 `.env` 中改为 `RWKV_EDIT_MODE=text`。新安装默认使用 `v0.2`，不需要改动。
