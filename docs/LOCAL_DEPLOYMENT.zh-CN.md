@@ -21,8 +21,8 @@
 
 | 空闲显存 | 自动选择的权重 | 下载体积 | 运行占用 |
 | :--- | :--- | :---: | :---: |
-| 低于 16 GB | `RWKV7-Pi-7.2B-v0.1-final.w8a16.rwkvq`（W8A16 量化） | 7.2 GB | 约 8.5 GB |
-| 16 GB 及以上 | `RWKV7-Pi-7.2B-v0.1-final.pth`（BF16 原始权重） | 13.4 GB | 约 14.2 GB |
+| 低于 16 GB | `RWKV7-Pi-7.2B-v0.2.w8a16.rwkvq`（W8A16 量化） | 7.2 GB | 约 8.5 GB |
+| 16 GB 及以上 | `RWKV7-Pi-7.2B-v0.2.pth`（BF16 原始权重） | 13.4 GB | 约 14.2 GB |
 
 > [!TIP]
 > 安装前请先关闭游戏、浏览器等占用显存的程序，否则可能被误判为显存不足。空闲显存不够时脚本会给出提醒；也可以用参数手动指定权重。
@@ -164,20 +164,30 @@ rwkv-engine set-deepseek <你的 DeepSeek API Key>
 
 Demo 位于安装目录下的 `demos/`，完整题目见 `demos/PROMPTS.zh-CN.md`。测完后执行 `rwkv-demos reset` 即可恢复原样，可以反复体验。
 
-| 目录 | 场景 | 是否需要 DeepSeek Key |
-| :--- | :--- | :---: |
-| `01-portal-security` | 两轮安全审计：先只读定位漏洞，再修复并跑通测试 | 否 |
-| `02-nginx-gateway` | 排查 Nginx 生产配置漂移 | 否 |
-| `03-warehouse-reconcile` | CSV 数据清洗 + SQLite 对账报表 | 否 |
-| `04-python-web-research` | 联网核验 Python 官方文档 | **是** |
-| `05-routemap` | 13 个文件的跨模块排障（33 项测试） | 推荐配置 |
-| `06-textindex` | 倒排索引 `search()` 回归修复（30 项测试） | 否 |
-| `07-cachebox-git` | 翻 Git 历史定位引入回归的提交 | 否 |
+下表中的「本地实测」是 `v0.2` W8A16 只用本地模型、不开子 Agent 时，每个 Demo 跑 3 次的通过次数：
+
+| 目录 | 场景 | 本地实测 | 是否需要 DeepSeek Key |
+| :--- | :--- | :---: | :---: |
+| `06-textindex` | 倒排索引 `search()` 回归修复（30 项测试） | **3/3**，约 20 秒 | 否 |
+| `01-portal-security` | 两轮安全审计：先只读定位漏洞，再修复并跑通测试 | 2/3（第 2 轮修复） | 否 |
+| `02-nginx-gateway` | 排查 Nginx 生产配置漂移 | 2/3 | 否 |
+| `04-python-web-research` | 联网核验 Python 官方文档 | — | **是** |
+| `05-routemap` | 13 个文件的跨模块排障（33 项测试） | 0/3，建议配合 `/rwkv-subagent` | 推荐配置 |
+| `03-warehouse-reconcile` | CSV 数据清洗 + SQLite 对账报表 | 0/3，挑战题 | 否 |
+| `07-cachebox-git` | 翻 Git 历史定位引入回归的提交 | 0/3，挑战题 | 否 |
 
 > [!NOTE]
-> 以下题目中的 `python3`，在 Windows 上请改为 `python`。
+> 7B 本地模型不保证每次都一次成功。没过时可以在对话里补充提示，或者执行 `rwkv-demos reset` 后重试。以下题目中的 `python3`，在 Windows 上请改为 `python`。
 
-### 实测 1：两轮安全审计（纯本地）
+### 实测 1：回归定位修复（纯本地，推荐先跑）
+
+进入 `demos/06-textindex` 目录运行 `pi`，输入：
+
+```text
+QA 报了一个回归问题：运行 python3 -m unittest discover -s tests 时有 5 个搜索测试失败——任何非空词查询实际都返回了空列表 []。请读取 textindex/index.py 后半段的 search() 函数（第 195–230 行）定位根本原因，用最小改动修复源代码（不要修改测试），运行 python3 -m unittest discover -s tests 确认全部 30 个测试通过并简要总结。
+```
+
+### 实测 2：两轮安全审计（纯本地）
 
 进入 `demos/01-portal-security` 目录运行 `pi`，依次输入下面两轮指令：
 
@@ -189,7 +199,7 @@ Demo 位于安装目录下的 `demos/`，完整题目见 `demos/PROMPTS.zh-CN.md
 第 2 轮（安全加固修复）：现在请修复 app/db.py 的 SQL 注入漏洞（改为参数化占位符查询）与 app/storage.py 的目录穿越漏洞（校验解析后的路径严格位于 base_dir.resolve() 内部，越界抛 ValueError），并运行 python3 -m unittest discover -s tests 确保测试全部通过。
 ```
 
-### 实测 2：联网检索（需要 DeepSeek Key）
+### 实测 3：联网检索（需要 DeepSeek Key）
 
 进入 `demos/04-python-web-research` 目录运行 `pi`，输入：
 
@@ -197,7 +207,7 @@ Demo 位于安装目录下的 `demos/`，完整题目见 `demos/PROMPTS.zh-CN.md
 请使用 web_search 与 web_fetch 查阅 Python 3 官方标准库文档（docs.python.org），准确对比 json 与 tomllib 两个模块：1) 哪个模块支持序列化写入（dump/dumps），哪个是纯只读解析？2) 各自的 load(fp) 函数对文件对象的打开模式（文本模式 'r' 还是二进制模式 'rb'）分别有什么强制要求？每项结论请附上核验过的官方文档 URL。
 ```
 
-### 实测 3：`/rwkv-subagent` 强弱协同（需要 DeepSeek Key）
+### 实测 4：`/rwkv-subagent` 强弱协同（需要 DeepSeek Key）
 
 进入 `demos/05-routemap` 目录运行 `pi`：
 

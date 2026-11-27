@@ -170,11 +170,11 @@ if ($LASTEXITCODE -ne 0) { throw "[ERROR] rwkv_lighting_cuda.exe --version faile
 
 Write-Host "==> [3/6] Preparing RWKV-7 7.2B model weights ($Precision)..." -ForegroundColor Cyan
 if ($Precision -eq "w8a16") {
-  $ModelFile = "RWKV7-Pi-7.2B-v0.1-final.w8a16.rwkvq"
+  $ModelFile = "RWKV7-Pi-7.2B-v0.2.w8a16.rwkvq"
   $DecodeBatch = 4
   $ChunkSize = 512
 } else {
-  $ModelFile = "RWKV7-Pi-7.2B-v0.1-final.pth"
+  $ModelFile = "RWKV7-Pi-7.2B-v0.2.pth"
   $DecodeBatch = 16
   $ChunkSize = 1024
 }
@@ -279,7 +279,13 @@ $EnvLines = @(
   "RWKV_EPOCH_BUDGET_TOKENS=9600"
   "RWKV_EPOCH_KEEP_RECENT_PAIRS=3"
   "RWKV_EPOCH_MAX_RESULT_TOKENS=2000"
-  "RWKV_EDIT_MODE=text"
+  "RWKV_EDIT_MODE=line"
+  "RWKV_TEMPERATURE=0.5"
+  "RWKV_TOP_P=0.7"
+  "RWKV_TOP_K=65536"
+  "RWKV_ALPHA_PRESENCE=0.8"
+  "RWKV_ALPHA_FREQUENCY=0.2"
+  "RWKV_ALPHA_DECAY=0.996"
   "RWKV_PLUGINS=none"
   "RWKV_SUBAGENT_SANDBOX=none"
   "RWKV_SUBAGENT_MOUNT="
