@@ -61,6 +61,7 @@ test("DAgger mode: skips teacher when RWKV student passes, and climbs out seamle
       TEACHER_BASE_URL: teacherServer.url,
       TEACHER_MODEL: "mock-deepseek",
       TEACHER_API_KEY: "mock",
+      TEACHER_EDIT_MODE: "text",
     }));
 
     // 1. Student passes -> zero teacher calls!
@@ -68,6 +69,7 @@ test("DAgger mode: skips teacher when RWKV student passes, and climbs out seamle
       RWKV_BACKEND: "openai",
       RWKV_BASE_URL: studentPassServer.url,
       RWKV_MODEL: "mock-rwkv",
+      RWKV_EDIT_MODE: "text",
       RWKV_HISTORY_MODE: "epoch",
     }));
     const easyTask = {
@@ -96,6 +98,7 @@ test("DAgger mode: skips teacher when RWKV student passes, and climbs out seamle
       RWKV_BACKEND: "openai",
       RWKV_BASE_URL: studentFailServer.url,
       RWKV_MODEL: "mock-rwkv",
+      RWKV_EDIT_MODE: "text",
       RWKV_HISTORY_MODE: "epoch",
     }));
     const hardTask = {
@@ -149,6 +152,70 @@ test("DAgger mode: skips teacher when RWKV student passes, and climbs out seamle
     assert.match(untrainedText, /NON_EXISTENT_LINE/, "RWKV's real mistake is preserved in train=false context");
     assert.doesNotMatch(trainedText, /NON_EXISTENT_LINE/, "RWKV's mistake is NEVER trained on (train=false)");
     assert.match(trainedText, /刚才的 edit 没有匹配上原文/, "Teacher's first-person climb-out reasoning IS trained on (train=true)");
+
+    // 3. Default Plan-B `line` mode DAgger: un-annealed student first drifts onto undeclared `Bash`,
+    // then reads `calc.py` with line numbers and hits syntax error; `buildDataset` accepts the
+    // unsupervised `Bash` prefix while strictly enforcing declared tools on all supervised teacher turns!
+    const lineStudentFail = await mockServer((_body, idx) => {
+      if (idx === 1) return { deltas: [{ reasoning_content: "Drift to Claude tool." }, toolCall("Bash", { command: "ls" }, "ls0")], finish: "tool_calls" };
+      if (idx === 2) return { deltas: [{ reasoning_content: "Read calc.py." }, toolCall("read", { path: "calc.py" }, "ls1")], finish: "tool_calls" };
+      if (idx === 3) {
+        return {
+          deltas: [{ reasoning_content: "Try broken syntax." }, toolCall("edit", { path: "calc.py", edits: [{ start_line: 2, end_line: 2, start_text: "    return a - b", new_text: "    return (" }] }, "ls2")],
+          finish: "tool_calls",
+        };
+      }
+      return { deltas: [{ reasoning_content: "Give up.", content: "Done." }] };
+    });
+    const lineTeacher = await mockServer((_body, idx) => {
+      if (idx === 1) {
+        return {
+          deltas: [
+            { reasoning_content: "刚才第 2 行括号未闭合导致语法报错，重新按第 2 行锚点 return a - b 写入 return a + b。" },
+            toolCall("edit", { path: "calc.py", edits: [{ start_line: 2, end_line: 2, start_text: "    return a - b", new_text: "    return a + b" }] }, "lt1"),
+          ],
+          finish: "tool_calls",
+        };
+      }
+      if (idx === 2) {
+        return {
+          deltas: [{ reasoning_content: "写入 DONE.txt。" }, toolCall("write", { path: "DONE.txt", content: "VERIFIED\n" }, "lt2")],
+          finish: "tool_calls",
+        };
+      }
+      return { deltas: [{ reasoning_content: "完成。", content: "已修复 calc.py 并写入 DONE.txt。" }] };
+    });
+    try {
+      const lineStudentProv = createRwkvProvider(readConfig({
+        RWKV_BACKEND: "openai",
+        RWKV_BASE_URL: lineStudentFail.url,
+        RWKV_MODEL: "mock-rwkv-line",
+      }));
+      const lineTeacherProv = createTeacherProvider(readTeacherConfig({
+        TEACHER_KIND: "qwen",
+        TEACHER_BASE_URL: lineTeacher.url,
+        TEACHER_MODEL: "mock-deepseek-line",
+        TEACHER_API_KEY: "mock",
+      }));
+      const rLine = await runDaggerTask({ ...hardTask, id: "dagger-line-1", family: "dagger-test-line" }, {
+        runtime: resolve("."),
+        provider: lineTeacherProv,
+        studentProvider: lineStudentProv,
+        outputDir: join(outDir, "line-dagger"),
+        sandbox: "none",
+      });
+      assert.equal(rLine.kind, "dagger_recovery");
+      assert.equal(rLine.record.status, "passed", rLine.record.error);
+      assert.equal(rLine.record.editMode, "line");
+      const lineDs = buildDataset([rLine.record]);
+      assert.equal(lineDs.samples.length, 3);
+      const lineSpans = packTrajectory(lineDs.samples, "xml");
+      const lineTrained = lineSpans.flatMap((sp) => sp.segments.filter((s) => s.train).map((s) => s.text)).join("");
+      assert.match(lineTrained, /"start_line":2,"end_line":2,"start_text":"    return a - b","new_text":"    return a \+ b"/);
+    } finally {
+      await lineStudentFail.close();
+      await lineTeacher.close();
+    }
   } finally {
     await studentPassServer.close();
     await studentFailServer.close();

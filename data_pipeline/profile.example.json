@@ -12,6 +12,7 @@
   "appendSystemPrompt": "COPY_THE_EXISTING_CHINESE_SYSTEM_CONSTRAINTS",
   "promptSuffix": "COPY_THE_EXISTING_CHINESE_QUESTION_SUFFIX",
   "protocol": "canonical XML+JSON",
+  "editMode": "line",
   "historyMode": "epoch",
   "epochBudgetTokens": 9600,
   "epochKeepRecentPairs": 2,

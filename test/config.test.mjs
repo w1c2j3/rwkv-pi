@@ -22,6 +22,8 @@ test("rejects incorrect API URLs without echoing embedded credentials", () => {
 
 test("parses and validates RWKV sampling overrides and sticky session ID", () => {
   const base = readConfig({});
+  assert.equal(base.historyMode, "epoch");
+  assert.equal(base.epochBudgetTokens, 9600);
   assert.equal(base.sampling, undefined);
   assert.equal(base.sessionId, undefined);
 

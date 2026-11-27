@@ -19,11 +19,15 @@ const answer = (prompt) => {
     : '<tool_call>{"name":"read","arguments":{"path":"input.txt"}}</tool_call>';
 };
 
+const seenSessionIds = new Set();
+
 async function lightning(t) {
   const server = createServer(async (req, res) => {
     let raw = ""; for await (const part of req) raw += part;
     if (req.url.endsWith("/tokens/count")) { res.setHeader("content-type", "application/json"); res.end('{"tokens":100}'); return; }
     if (req.url.endsWith("/server/stop")) { res.end("{}"); return; }
+    const sid = req.headers["x-rwkv-session-id"];
+    if (typeof sid === "string" && sid) seenSessionIds.add(sid);
     const text = answer(JSON.parse(raw).contents[0]);
     res.writeHead(200, { "content-type": "text/event-stream" });
     const emit = (delta, finish_reason = null) => res.write(`data: ${JSON.stringify({ id: "raw", object: "chat.completion.chunk", choices: [{ index: 0, delta, finish_reason, ...(finish_reason ? { matched_stop: "<EOD>" } : {}) }] })}\n\n`);
@@ -67,4 +71,5 @@ test("parallel read and write subagents, budget stop, copy-only changes and conf
   assert.equal(await readFile(join(ws, "out.txt"), "utf8"), "written by subagent\n");
   const result = JSON.parse(await readFile(join(writer.dir, "result.json"), "utf8"));
   assert.equal(result.applied, true);
+  assert.equal(seenSessionIds.size, 3, `Expected 3 distinct X-RWKV-Session-Id headers, got: ${[...seenSessionIds].join(", ")}`);
 });

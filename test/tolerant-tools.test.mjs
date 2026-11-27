@@ -34,10 +34,10 @@ test("wrapped tools keep every model-visible field of pi's definitions", () => {
   }
 });
 
-test("exact edits behave exactly as pi's edit", async (t) => {
+test("exact edits behave exactly as pi's edit plus compact post-edit micro-window", async (t) => {
   const cwd = await workspace(t, { "a.py": "def f():\n    return 1\n" });
   const result = await edit(cwd, "a.py", "return 1", "return 2");
-  assert.equal(text(result), "Successfully replaced 1 block(s) in a.py.");
+  assert.equal(text(result), "Successfully replaced 1 block(s) in a.py.\n[a.py lines 1-2]\ndef f():\n    return 2");
   assert.equal(await readFile(join(cwd, "a.py"), "utf8"), "def f():\n    return 2\n");
 });
 
@@ -78,7 +78,8 @@ test("failures say what is actually in the file", async (t) => {
   await assert.rejects(edit(cwd, "e.py", "def total(items):\n    result = []\n    for item in item:\n        result = result + item", "pass"),
     /Could not find the edit in e\.py\.[^\n]*closest text is lines 1-\d+ \(\d+% similar\)\. Copy oldText exactly from these lines:\ndef total\(items\):/);
   await edit(cwd, "e.py", "    result = 0", "    result = 10");
-  await assert.rejects(edit(cwd, "e.py", "    result = 0", "    result = 10"), /new text already is \(line 2\)\. The change appears to be applied already/);
+  await assert.rejects(edit(cwd, "e.py", "    result = 0", "    result = 10"), /new text already is \(line 2\)\. The change appears to be applied already; do not repeat this edit/);
+  await assert.rejects(edit(cwd, "e.py", "    result = 10", "    result = 10"), /No edit needed in e\.py: oldText and newText are identical/);
   await assert.rejects(edit(cwd, "e.py", "completely unrelated text here", "x"), /Nothing similar was found; read e\.py again/);
   assert.equal(await readFile(join(cwd, "d.py"), "utf8"), "x = 1\nprint(x)\ny = 2\nprint(x)\n");
 });
@@ -199,7 +200,7 @@ test("tolerance changes tool results only: the model-visible request is byte-ide
   for (const tolerance of ["0", "1"]) {
     const server = await mockServer(respond);
     t.after(server.close);
-    const provider = createRwkvProvider(readConfig({ RWKV_BACKEND: "openai", RWKV_BASE_URL: server.url, RWKV_MODEL: "mock-only", RWKV_TOOL_TOLERANCE: tolerance }));
+    const provider = createRwkvProvider(readConfig({ RWKV_BACKEND: "openai", RWKV_BASE_URL: server.url, RWKV_MODEL: "mock-only", RWKV_EDIT_MODE: "text", RWKV_TOOL_TOLERANCE: tolerance }));
     ({ record: records[tolerance] } = await runTask(task, { provider, role: "smoke", outputDir: join(outputDir, tolerance), maxRequests: 4, timeoutMs: 10_000, sandbox: "none" }));
   }
   const first = (record) => ({ system: record.steps[0].request.messages[0].content.replace(/\/[^\s"]*rwkv-pi-tolerance-parity-[^\s"]*/g, "CWD"), tools: record.steps[0].request.tools });
@@ -253,4 +254,53 @@ test("syntax guard blocks newly introduced TS, Python, and JSON syntax errors wi
   assert.equal(await introducedEditSyntaxError(brokenPy, "def broken(:\n    return 2\n", "broken.py"), undefined);
   await edit(cwd, "broken.py", "return 1", "return 2");
   assert.equal(await readFile(join(cwd, "broken.py"), "utf8"), "def broken(:\n    return 2\n");
+
+  const origSh = "#!/usr/bin/env bash\nif [ -f \"$1\" ]; then\n  echo ok\nfi\n";
+  await writeFile(join(cwd, "run.sh"), origSh);
+  await assert.rejects(
+    edit(cwd, "run.sh", "  echo ok\nfi", "  echo ok"),
+    /introduces a syntax error/,
+  );
+  assert.equal(await readFile(join(cwd, "run.sh"), "utf8"), origSh);
+});
+
+test("copied line-number prefixes are stripped safely without touching real numbered keys, and elision placeholders are guarded", async (t) => {
+  const cwd = await workspace(t, {
+    "calc.py": "def compute(a, b):\n    total = a - b\n    return total\n",
+    "table.js": "export const labels = {\n  1: 'alpha',\n  2: 'beta',\n};\n",
+  });
+
+  // Multi-line copied DSH/grep line numbers in both oldText and newText
+  const res1 = await edit(cwd, "calc.py", "1: def compute(a, b):\n2:     total = a - b", "1: def compute(a, b):\n2:     total = a + b");
+  assert.match(text(res1), /stripping copied line numbers/);
+  assert.equal(await readFile(join(cwd, "calc.py"), "utf8"), "def compute(a, b):\n    total = a + b\n    return total\n");
+
+  // Single-line tab-numbered copy (`cat -n` / `nl -ba`) with drifted indent
+  const res2 = await edit(cwd, "calc.py", "   3\t  return total", "   3\t  return max(0, total)");
+  assert.match(text(res2), /(?:stripping|stripped) copied line numbers/);
+  assert.equal(await readFile(join(cwd, "calc.py"), "utf8"), "def compute(a, b):\n    total = a + b\n    return max(0, total)\n");
+
+  // Real object keys `1: 'alpha'` must match normally without stripping `1: `
+  await edit(cwd, "table.js", "1: 'alpha',\n2: 'beta',", "1: 'ALPHA',\n2: 'BETA',");
+  assert.equal(await readFile(join(cwd, "table.js"), "utf8"), "export const labels = {\n  1: 'ALPHA',\n  2: 'BETA',\n};\n");
+
+  // Elision placeholder in newText is refused before touching disk
+  await assert.rejects(
+    edit(cwd, "calc.py", "def compute(a, b):\n    total = a + b\n    return max(0, total)", "def compute(a, b):\n    # ... existing code ...\n    return total"),
+    /elision placeholder/,
+  );
+
+  // Elision marker `...` in oldText refuses safely and returns the exact bracketed lines
+  await assert.rejects(
+    edit(cwd, "calc.py", "def compute(a, b):\n    ...\n    return max(0, total)", "def compute(a, b):\n    return a + b"),
+    /elision marker \("\.\.\."\)[^\n]*lines 1-3:\ndef compute\(a, b\):\n    total = a \+ b\n    return max\(0, total\)/,
+  );
+
+  // Substantial unique single-line close match (>=20 chars, >=90% similar) succeeds while short lines stay strict
+  const cwdSingle = await workspace(t, {
+    "index.py": "def search(docs):\n    hits = {}\n    for doc in docs:\n        hits[doc] = hits.get(doc, 0) + 1\n    return hits\n",
+  });
+  const resSingle = await edit(cwdSingle, "index.py", "        hits[doc] = hits.get(doc, 0) + 2", "        hits[doc] = hits.get(doc, 0) + 10");
+  assert.match(text(resSingle), /as the closest match \(\d+% similar\)/);
+  assert.match(await readFile(join(cwdSingle, "index.py"), "utf8"), /hits\.get\(doc, 0\) \+ 10/);
 });

@@ -34,7 +34,8 @@ def collect_plan(root, profile_paths):
                            RWKV_MODEL=student['modelId'], RWKV_API_KEY=student['apiKey'],
                            RWKV_CONTEXT_WINDOW=str(student['contextWindow']), RWKV_MAX_TOKENS=str(student['maxTokens']),
                            RWKV_TOOL_FORMAT='xml', RWKV_PROMPT_TEMPLATE='xml', RWKV_TOOL_CALL_RECOVERY='1',
-                           RWKV_IDENTICAL_CALL_LIMIT='2', RWKV_PLUGINS='none')
+                           RWKV_IDENTICAL_CALL_LIMIT='2', RWKV_PLUGINS='none',
+                           RWKV_EDIT_MODE=str(student.get('editMode', profile.get('editMode', 'line'))))
                 if student.get('adapterId'):
                     env['RWKV_ADAPTER_ID'] = str(student['adapterId'])
                 if student.get('adapterVersion'):

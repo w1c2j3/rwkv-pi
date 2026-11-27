@@ -17,7 +17,7 @@ def question_identity(bundle):
     return digest(encoded({'task':t,'followups':bundle.get('followups',[])}))
 def profile_identity(profile):
     # Keys and credential locations do not enter dataset metadata or identity.
-    fields=('provider','model','baseUrl','api','thinking','contextWindow','maxTokens','samplingParams','compat','systemPromptProfile','appendSystemPrompt','promptSuffix','protocol','adapterRevision','runtimeRevision','studentProfile','historyMode','epochBudgetTokens','epochKeepRecentPairs','epochMaxResultTokens')
+    fields=('provider','model','baseUrl','api','thinking','contextWindow','maxTokens','samplingParams','compat','systemPromptProfile','appendSystemPrompt','promptSuffix','protocol','adapterRevision','runtimeRevision','studentProfile','historyMode','editMode','epochBudgetTokens','epochKeepRecentPairs','epochMaxResultTokens')
     selected={k:profile[k]for k in fields if k in profile}
     for field in ('provider','model','baseUrl','api','thinking','protocol'):assert selected.get(field),field
     url=urlsplit(selected['baseUrl']);assert url.scheme in ('https','http') and url.hostname and not (url.username or url.password or url.query or url.fragment),'Endpoint must not contain credentials'

@@ -23,9 +23,12 @@ function validateMessages(messages: Record<string, unknown>[], tools: unknown[])
       if (pending.size) throw new Error("Tool call missing a result before the next conversation turn.");
       if (message.tool_calls !== undefined) {
         if (!Array.isArray(message.tool_calls)) throw new Error("Invalid tool_calls.");
+        const isSupervisedTarget = index === messages.length - 1;
         for (const call of message.tool_calls) {
           if (!object(call) || typeof call.id !== "string" || !call.id || pending.has(call.id) || !object(call.function)
-            || !names.has(call.function.name) || typeof call.function.arguments !== "string" || !object(JSON.parse(call.function.arguments))) {
+            || typeof call.function.name !== "string" || !call.function.name
+            || (isSupervisedTarget && !names.has(call.function.name))
+            || typeof call.function.arguments !== "string" || !object(JSON.parse(call.function.arguments))) {
             throw new Error("Malformed or undeclared tool call.");
           }
           pending.add(call.id);

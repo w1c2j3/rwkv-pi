@@ -9,12 +9,12 @@ import {delegationTools, delegationEligibility} from './delegation.mjs';
 
 const save = (p, x) => writeFileSync(p, JSON.stringify(x, null, 2) + '\n', {mode:0o600});
 const sha = bytes => createHash('sha256').update(bytes).digest('hex');
-const WORKFLOW = '本次采用真实协作（两阶段闭环，9.6K滚动上下文）：第一阶段（仅当 State Ledger 中尚未记录 subagent_wait 完成时执行）最多调用 3 次只读工具（如 ls 查看目录或 read 阅读 README.md），严禁逐个通读源码，随后立即调用 subagent_plan、subagent_start、subagent_wait 将任务委派给 RWKV 子 agent 执行。第二阶段（一旦 subagent_wait 返回，或 State Ledger 已显示 subagent_wait 完成）：严禁再次调用 subagent_plan/subagent_start！若子 agent 产生有效修改可先 subagent_diff 审查再 subagent_apply；若子 agent 失败或验收未过，主工作区 read/write/edit/bash 已完全解锁，请严格按【用 read 读 1 个目标文件 -> 立即用 edit/write 修改该文件 -> 再读下一个文件】的增量方式直接修复（严禁用 bash 一次性 cat 多个文件或通读全仓），最后调用 subagent_verify 通过独立验收并用简体中文简洁总结。';
+const WORKFLOW = '本次采用真实协作（两阶段闭环，9.6K滚动上下文）：第一阶段（仅当 State Ledger 中尚未记录 subagent_wait 完成时执行）最多调用 3 次只读工具（如 ls 查看目录或 read 阅读 README.md），严禁逐个通读源码，随后立即调用 subagent_plan、subagent_start、subagent_wait 将任务委派给 RWKV 子 agent 执行。第二阶段（一旦 subagent_wait 返回，或 State Ledger 已显示 subagent_wait 完成）：严禁再次调用 subagent_plan/subagent_start！若子 agent 产生有效修改可先 subagent_diff 审查再 subagent_apply；若子 agent 失败或验收未过，主工作区 read/write/edit/bash 已完全解锁，请严格按【用 read 读 1 个目标文件（<=150 行）确认 1-based 行号与首行锚点 -> 立即用 edit({"path":...,"edits":[{"start_line":...,"end_line":...,"start_text":...,"new_text":...}]}) 原子批量修改或 write 修改该文件 -> 再读下一个文件】的增量方式直接修复（严禁未读盲改或用 bash 一次性 cat 多个文件），最后调用 subagent_verify 通过独立验收并用简体中文简洁总结。';
 
 export async function runDelegatedTask(input, options) {
   const load = name => import(pathToFileURL(join(options.runtime, 'dist', name + '.js')).href);
-  const [{parseTask,taskPath},{digest,runtimeProvenance},{WorkspaceSandbox},{SubagentManager},{SubagentPlan},{foldEpochRequest},{foldWorklistRequest}]
-    = await Promise.all(['tasks','provenance','sandbox','subagents','subagent-plan','epoch','worklist'].map(load));
+  const [{parseTask,taskPath},{digest,runtimeProvenance},{WorkspaceSandbox},{SubagentManager},{SubagentPlan},{foldEpochRequest},{foldWorklistRequest},{createLineModeTools,LineViewTracker},{TOLERANT_TOOL_NAMES,withTolerance}]
+    = await Promise.all(['tasks','provenance','sandbox','subagents','subagent-plan','epoch','worklist','line-edit','tolerant-tools'].map(load));
   const task=parseTask(input);
   if(task.environment)throw Error('This collector currently accepts the reviewed Linux sandbox tasks only');
   const runId=randomUUID(), dir=resolve(options.outputDir,runId), cwd=join(dir,'workspace');
@@ -26,6 +26,7 @@ export async function runDelegatedTask(input, options) {
   if(model.provider!==options.teacherIdentity?.provider||model.id!==options.teacherIdentity?.id)throw Error('Configured teacher identity mismatch');
   const followups=(options.followups??[]).map(f=>typeof f==='string'?f:f?.prompt);
   if(followups.some(f=>typeof f!=='string'||!f.trim()))throw Error('Invalid follow-up prompt');
+  const effectiveEditMode=options.editMode??options.provider.rwkvPiEditMode??'line';
   const effectiveHistoryMode=options.historyMode??options.provider.rwkvPiHistoryMode??'full';
   const effectiveEpochConfig=options.epoch??options.provider.rwkvPiEpochConfig;
   const effectiveWorklistConfig=options.worklist??options.provider.rwkvPiWorklistConfig;
@@ -34,6 +35,7 @@ export async function runDelegatedTask(input, options) {
   const {id:_id,split:_split,...definition}=task;
   const record={schemaVersion:1,runId,task,taskSha256:digest(definition),role:'teacher',
     model:{provider:model.provider,id:model.id},provenance:runtimeProvenance(),isolation:sandbox.kind,workspacePath:agentCwd,responseAdapter:'none',
+    editMode:effectiveEditMode,
     ...(options.historyMode!==undefined||effectiveHistoryMode==='epoch'||effectiveHistoryMode==='worklist'?{historyMode:effectiveHistoryMode}:{}),
     startedAt:new Date().toISOString(),finishedAt:'',budget:{maxRequests:options.maxRequests,timeoutMs:options.timeoutMs},
     generation:{contextWindow:model.contextWindow,maxTokens:model.maxTokens,thinkingLevel:options.thinkingLevel},
@@ -77,7 +79,11 @@ export async function runDelegatedTask(input, options) {
   const controlTools=delegationTools({manager,plan,verify,recordEvent:e=>{
     record.delegationEvents.push(e);event({type:'delegation',...e});checkpoint();
   }});
-  const rawWorkspaceTools=sandbox.tools(['read','write','edit','bash','grep','find','ls']);
+  const lineTracker=effectiveEditMode==='line'?new LineViewTracker():undefined;
+  const baseSandboxTools=sandbox.tools(['read','write','edit','bash','grep','find','ls']);
+  const rawWorkspaceTools=effectiveEditMode==='line'
+    ?createLineModeTools(baseSandboxTools,agentCwd,sandbox.fs,{tolerance:true,tracker:lineTracker})
+    :baseSandboxTools.map(t=>TOLERANT_TOOL_NAMES.includes(t.name)?withTolerance(t,agentCwd,sandbox.fs):t);
   let preDelegationReads=0;
   const workspaceTools=rawWorkspaceTools.map(t=>{
     return {...t,async execute(callId,args,signal,onUpdate,ctx){
@@ -111,6 +117,7 @@ export async function runDelegatedTask(input, options) {
       if(effectiveHistoryMode==='epoch')request=foldEpochRequest(request,effectiveEpochConfig).request;
       else if(effectiveHistoryMode==='worklist')request=foldWorklistRequest(request,effectiveWorklistConfig).request;
     }
+    if(Array.isArray(request.messages))lineTracker?.syncWithActiveMessages(request.messages);
     request=structuredClone(request);
     if(!Array.isArray(request.messages)||!Array.isArray(request.tools))throw Error('Native Pi request capture unavailable');
     record.steps.push({request});event({type:'request',index:record.steps.length-1,request});checkpoint();return request;

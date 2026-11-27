@@ -1,6 +1,6 @@
 import { spawn, type ChildProcessByStdio } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { basename, delimiter, join, posix, resolve } from "node:path";
 import type { Readable } from "node:stream";
@@ -49,7 +49,12 @@ export class WorkspaceSandbox {
   private readonly prefix: string[];
   private readonly searchBinaries = new Set<string>();
   private readonly statCache = new Map<string, boolean>();
-  constructor(hostCwd: string, private readonly environment?: TaskEnvironment, workspaceMount = WORKSPACE_MOUNT) {
+  constructor(
+    hostCwd: string,
+    private readonly environment?: TaskEnvironment,
+    workspaceMount = WORKSPACE_MOUNT,
+    spillHostDir?: string,
+  ) {
     // A caller can test an unseen path without aliases for paths remembered from training.
     // Keep custom mounts away from the system directories needed by native tools.
     if (workspaceMount !== WORKSPACE_MOUNT && (!workspaceMount.startsWith("/srv/") ||
@@ -59,7 +64,7 @@ export class WorkspaceSandbox {
     if (environment && workspaceMount !== WORKSPACE_MOUNT) throw new Error("Container tasks use their image's workdir.");
     this.kind = environment ? "docker" : "bubblewrap";
     this.cwd = environment ? environment.workdir : workspaceMount;
-    if (environment) { this.prefix = this.dockerPrefix(hostCwd, environment); return; }
+    if (environment) { this.prefix = this.dockerPrefix(hostCwd, environment, spillHostDir); return; }
     this.prefix = ["--unshare-all", "--die-with-parent", "--new-session", "--cap-drop", "ALL"];
     // /etc/alternatives holds the targets of Debian alternatives links such as awk, cc and java;
     // the JDK reads its security/config files through /etc/java-*-openjdk. Both are read-only system config.
@@ -71,6 +76,10 @@ export class WorkspaceSandbox {
       "--proc", "/proc", "--dev", "/dev", "--tmpfs", "/tmp", "--dir", "/home/sandbox",
       "--dir", "/opt/rwkv-pi/bin", "--ro-bind", process.execPath, "/opt/rwkv-pi/bin/node",
     );
+    if (spillHostDir) {
+      mkdirSync(resolve(spillHostDir), { recursive: true, mode: 0o700 });
+      this.prefix.push("--dir", "/tmp/dsh-spill", "--bind", resolve(spillHostDir), "/tmp/dsh-spill");
+    }
     // Search tools run the same rg/fd binaries pi would use, but inside the namespace.
     for (const name of ["rg", "fd"] as const) {
       const binary = hostBinary(name);
@@ -83,12 +92,16 @@ export class WorkspaceSandbox {
     );
   }
 
-  private dockerPrefix(hostCwd: string, env: TaskEnvironment): string[] {
+  private dockerPrefix(hostCwd: string, env: TaskEnvironment, spillHostDir?: string): string[] {
     const prefix = ["run", "--rm", "-i", "--network", "none", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
       "--read-only", "--tmpfs", "/tmp:rw,exec,size=2g", "--tmpfs", "/home/sandbox:rw,size=256m", "--pids-limit", "1024",
       "--memory", "8g", "--user", `${process.getuid?.() ?? 1000}:${process.getgid?.() ?? 1000}`, "--entrypoint", "",
       "-v", `${dockerHostPath(resolve(hostCwd))}:${env.workdir}`, "-w", env.workdir,
       "-v", `${dockerHostPath(process.execPath)}:/opt/rwkv-pi/bin/node:ro`];
+    if (spillHostDir) {
+      mkdirSync(resolve(spillHostDir), { recursive: true, mode: 0o700 });
+      prefix.push("-v", `${dockerHostPath(resolve(spillHostDir))}:/tmp/dsh-spill:rw`);
+    }
     for (const name of ["rg", "fd"] as const) {
       const binary = hostBinary(name);
       if (binary) { prefix.push("-v", `${dockerHostPath(binary)}:/opt/rwkv-pi/bin/${name}:ro`); this.searchBinaries.add(name); }
@@ -199,8 +212,16 @@ export class WorkspaceSandbox {
     JSON.parse((await this.checked(["/opt/rwkv-pi/bin/node", "-e", LIST_FILES_SCRIPT, root,
       JSON.stringify(SKIPPED_DIRECTORIES), String(MAX_LISTED_FILES)])).toString()) as string[];
 
-  /** The workspace as the agent sees it, for the recall-tolerant tool wrappers. */
-  readonly fs: WorkspaceFs = { readFile: (path) => this.readFile(path), exists: (path) => this.exists(path), listFiles: (root) => this.listFiles(root) };
+  /** The workspace as the agent sees it, for the recall-tolerant and line-mode tool wrappers. */
+  readonly fs: WorkspaceFs = {
+    readFile: (path) => this.readFile(path),
+    writeFile: async (path, content) => {
+      await this.mkdir(posix.dirname(path));
+      await this.writeFile(path, typeof content === "string" ? content : content.toString("utf8"));
+    },
+    exists: (path) => this.exists(path),
+    listFiles: (root) => this.listFiles(root),
+  };
 
   /** Fail closed when the loaded pi ignores the spawn hook (it would search the host instead). */
   async probeSearch(names: readonly PiToolName[]): Promise<void> {

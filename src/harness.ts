@@ -17,6 +17,7 @@ import { parseToolList, PI_TOOL_NAMES, type PiToolName } from "./tools.js";
 import type { RwkvConfig } from "./config.js";
 import { foldEpochRequest, type FoldOpenAIEpochOptions } from "./epoch.js";
 import { budgetRwkvRequest, type TokenBudget } from "./token-budget.js";
+import { createLineModeTools, type EditMode, LineViewTracker } from "./line-edit.js";
 import { promptVersion } from "./prompt.js";
 import { repeatedIdenticalCall, repeatedTargetFailure, repeatedWorklistSpin } from "./loop-guard.js";
 import { hostFs, TOLERANT_TOOL_NAMES, withTolerance } from "./tolerant-tools.js";
@@ -44,6 +45,7 @@ export interface RunRecord {
   loopGuard?: { repeatFailureLimit: number; identicalCallLimit?: number; targetFailureLimit?: number };
   /** Recall-tolerant read/edit/write/ls execution (src/tolerant-tools.ts). */
   toolTolerance?: "rwkv-tolerant-tools-v1";
+  editMode?: EditMode;
   toolCallRecovery?: "pi-native-validation";
   historyMode?: "full" | "epoch" | "worklist";
   appendSystemPrompt?: string;
@@ -69,6 +71,8 @@ export interface HarnessOptions {
   sandbox?: "bubblewrap" | "none";
   /** Optional unseen mount for path-generalization tests; no path aliases are created. */
   workspaceMount?: string;
+  /** Optional host directory mounted at `/tmp/dsh-spill` inside the sandbox for oversized `web_fetch` spills. */
+  spillHostDir?: string;
   inference?: RunRecord["inference"];
   contextBudget?: RwkvConfig;
   thinkingLevel?: "high" | "off";
@@ -77,6 +81,8 @@ export interface HarnessOptions {
   appendSystemPrompt?: string;
   promptSuffix?: string;
   webTools?: ToolDefinition[];
+  /** Optional explicit edit mode (`line` or `text`) overriding provider configuration. */
+  editMode?: EditMode;
   /** Optional explicit history compaction mode for teacher/collector runs (student runs inherit from provider). */
   historyMode?: "full" | "epoch" | "worklist";
   epoch?: FoldOpenAIEpochOptions;
@@ -109,7 +115,7 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
   if (options.workspaceMount && (options.sandbox === "none" || task.environment)) {
     throw new Error("A custom workspace mount requires the bubblewrap sandbox without a container environment.");
   }
-  const sandbox = options.sandbox === "none" ? undefined : new WorkspaceSandbox(cwd, task.environment, options.workspaceMount);
+  const sandbox = options.sandbox === "none" ? undefined : new WorkspaceSandbox(cwd, task.environment, options.workspaceMount, options.spillHostDir);
   // The agent and the checks see the workspace at the sandbox's path (the image workdir for containers).
   const agentCwd = sandbox?.cwd ?? cwd;
   await sandbox?.probe();
@@ -129,11 +135,13 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
   const identicalCallLimit = rwkv.rwkvPiIdenticalCallLimit ?? 0;
   const targetFailureLimit = rwkv.rwkvPiTargetFailureLimit ?? 0;
   const tolerant = rwkv.rwkvPiToolTolerance === true;
+  const effectiveEditMode: EditMode = options.editMode ?? rwkv.rwkvPiEditMode ?? "text";
   const effectiveHistoryMode = options.historyMode ?? rwkv.rwkvPiHistoryMode ?? "full";
   const effectiveEpochConfig = options.epoch ?? rwkv.rwkvPiEpochConfig;
   const effectiveWorklistConfig = options.worklist ?? rwkv.rwkvPiWorklistConfig;
   const worklistMode = effectiveHistoryMode === "worklist";
   const worklistState = worklistMode ? new PiWorklistState() : undefined;
+  const lineTracker = effectiveEditMode === "line" ? new LineViewTracker() : undefined;
   const record: RunRecord = {
     schemaVersion: 1, runId, task, taskSha256: digest(definition), role: options.role,
     model: { provider: model.provider, id: model.id }, provenance: runtimeProvenance(),
@@ -145,6 +153,7 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
       ? { loopGuard: { repeatFailureLimit: rwkv.rwkvPiRepeatFailureLimit, ...(identicalCallLimit ? { identicalCallLimit } : {}),
         ...(targetFailureLimit ? { targetFailureLimit } : {}) } } : {}),
     ...(tolerant ? { toolTolerance: "rwkv-tolerant-tools-v1" as const } : {}),
+    ...(effectiveEditMode === "line" || options.editMode !== undefined ? { editMode: effectiveEditMode } : {}),
     ...(rwkv.rwkvPiToolCallRecovery ? { toolCallRecovery: "pi-native-validation" as const } : {}),
     ...(options.historyMode !== undefined || effectiveHistoryMode === "epoch" || effectiveHistoryMode === "worklist" ? { historyMode: effectiveHistoryMode } : {}),
     ...(options.appendSystemPrompt !== undefined ? { appendSystemPrompt: options.appendSystemPrompt } : {}),
@@ -178,7 +187,10 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
   });
   modelRuntime.registerNativeProvider(options.provider);
   const rawTools = sandbox?.tools(piTools) ?? hostTools(cwd, piTools);
-  const baseCustomTools = tolerant ? tolerantTools(rawTools, agentCwd, sandbox?.fs ?? hostFs) : rawTools;
+  const wsFs = sandbox?.fs ?? hostFs;
+  const baseCustomTools = effectiveEditMode === "line"
+    ? createLineModeTools(rawTools, agentCwd, wsFs, { tolerance: tolerant, tracker: lineTracker })
+    : (tolerant ? tolerantTools(rawTools, agentCwd, wsFs) : rawTools);
   const customTools = [...baseCustomTools, ...extraWebTools, ...(worklistState ? createWorklistTools(worklistState) : [])];
   const orderedPiTools = piTools.length ? parseToolList(piTools) : [];
   const webToolNames = extraWebTools.map((t) => t.name);
@@ -195,7 +207,7 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
       const { name, arguments: args } = context.toolCall;
       const reason = (worklistMode ? repeatedWorklistSpin(messages, name) : undefined)
         ?? (identicalCallLimit ? repeatedIdenticalCall(messages, name, args, identicalCallLimit) : undefined)
-        ?? (targetFailureLimit ? repeatedTargetFailure(messages, name, args, targetFailureLimit) : undefined);
+        ?? (targetFailureLimit ? repeatedTargetFailure(messages, name, args, targetFailureLimit, effectiveEditMode) : undefined);
       if (reason) return { block: true, reason };
       if (worklistState && !isWorklistTool(name)) worklistState.recordWorkspaceTool();
       return previousBefore?.(context, signal);
@@ -233,6 +245,7 @@ export async function runTask(input: Task, options: HarnessOptions): Promise<{ r
       tokenBudget = prepared.budget;
     }
     if (!object(request) || !Array.isArray(request.messages) || !request.messages.every(object)) throw new Error("Invalid budgeted chat request.");
+    lineTracker?.syncWithActiveMessages(request.messages);
     const captured = structuredClone({ ...request, messages: request.messages, tools: request.tools ?? [] });
     if (!Array.isArray(captured.tools)) throw new Error("Expected OpenAI tool definitions.");
     const step: Step = { request: { ...captured, tools: captured.tools }, ...(tokenBudget ? { tokenBudget } : {}) };

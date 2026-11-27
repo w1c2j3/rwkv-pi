@@ -18,7 +18,7 @@
  * Every tolerated repair is stated in the tool result. Successful exact calls are untouched.
  */
 import { spawn } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import * as nodeModule from "node:module";
 import { posix } from "node:path";
 import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
@@ -26,6 +26,7 @@ import type { ToolDefinition } from "@earendil-works/pi-coding-agent";
 /** File access in the agent's view of the workspace (the host, or inside a sandbox). */
 export interface WorkspaceFs {
   readFile(path: string): Promise<Buffer>;
+  writeFile?(path: string, content: string | Buffer): Promise<void>;
   exists(path: string): Promise<boolean>;
   /** Regular files below `root` as sorted relative POSIX paths, bounded and without dependency/cache directories. */
   listFiles(root: string): Promise<string[]>;
@@ -37,6 +38,10 @@ const byCodePoint = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0);
 
 export const hostFs: WorkspaceFs = {
   readFile: (path) => readFile(path),
+  writeFile: async (path, content) => {
+    await mkdir(posix.dirname(path), { recursive: true });
+    await writeFile(path, content);
+  },
   exists: async (path) => { try { await stat(path); return true; } catch { return false; } },
   async listFiles(root) {
     const skip = new Set(SKIPPED_DIRECTORIES), out: string[] = [];
@@ -337,7 +342,8 @@ function similarRegion(file: Lines, old: string[]): RegionResult {
   }
   const anchorsOk = !splitAnchor && firstScores[best.p]! >= 0.88 && lastScores[best.p + n - 1]! >= 0.88;
   const closest = { firstLine: first + 1, lastLine: last + 1, similarity: best.score };
-  if (n < 2 || best.score < 0.9 || !anchorsOk || (runner && runner.score > best.score - 0.1)) {
+  const singleOk = n === 1 && oldKeys[0]!.length >= 20 && (!runner || runner.score <= best.score - 0.12);
+  if ((n < 2 && !singleOk) || best.score < 0.9 || !anchorsOk || (runner && runner.score > best.score - 0.1)) {
     return { kind: "none", ...(best.score >= 0.5 ? { closest } : {}) };
   }
   return { kind: "match", match: { level: "similar", start: file.starts[first]!, end: file.starts[last]! + file.text[last]!.length,
@@ -379,8 +385,86 @@ export function reindent(text: string, indents: readonly (readonly [string, stri
 }
 
 const lineAt = (content: string, offset: number) => content.slice(0, offset).split("\n").length;
+function visibleLineCount(content: string): number {
+  const lines = content.split("\n");
+  return lines.length > 1 && lines.at(-1) === "" ? lines.length - 1 : lines.length;
+}
 function excerpt(content: string, first: number, last: number): string {
   return content.split("\n").slice(first - 1, last).join("\n");
+}
+
+const COPIED_LINE_NUMBER = /^[ \t]*(\d+)(?:: ?|\t|→ ?)(.*)$/;
+const ELISION_PLACEHOLDER_COMMENT = /^[ \t]*(?:\/\/+|#+|\/\*+|<!--)[ \t]*(?:\.{3}|…)[ \t]*(?:existing|rest|unchanged|remaining|omitted|other|previous|keep|same|code|lines|body|impl)\b/i;
+const STANDALONE_ELISION_LINE = /^[ \t]*(?:\/\/+[ \t]*|#+[ \t]*|\/\*+[ \t]*)?(?:\.{3}|…)[ \t]*(?:\*+\/)?$/;
+
+function stripSequentialNumbers(text: string, allowSingleLine: boolean): { stripped: string; firstNum: number; count: number } | undefined {
+  const lf = toLF(text);
+  const trailing = lf.endsWith("\n");
+  const lines = (trailing ? lf.slice(0, -1) : lf).split("\n");
+  let firstNum = -1, expectedNext = -1, numbered = 0;
+  const out: string[] = [];
+  for (const line of lines) {
+    const m = COPIED_LINE_NUMBER.exec(line);
+    if (!m) {
+      if (!isBlank(line)) return undefined;
+      out.push(line);
+      if (expectedNext >= 0) expectedNext++;
+      continue;
+    }
+    const num = Number(m[1]);
+    if (!Number.isSafeInteger(num) || num < 1) return undefined;
+    if (expectedNext >= 0 && num !== expectedNext) return undefined;
+    if (firstNum < 0) firstNum = num;
+    expectedNext = num + 1;
+    numbered++;
+    out.push(m[2]!);
+  }
+  if (numbered === 0 || (numbered === 1 && (!allowSingleLine || out.every(isBlank)))) return undefined;
+  return { stripped: out.join("\n") + (trailing ? "\n" : ""), firstNum, count: numbered };
+}
+
+/**
+ * Strips line-number prefixes (`12: ...`, `  12\t...`, `12→...`) copied from numbered read/grep/nl output,
+ * only when the raw oldText does not already match the file and the stripped oldText uniquely does.
+ */
+export function stripCopiedLineNumbers(content: string, oldText: string, newText: string): { oldText: string; newText: string; stripped: boolean } {
+  const oldParsed = stripSequentialNumbers(oldText, true);
+  if (!oldParsed || !oldParsed.stripped.trim()) return { oldText, newText, stripped: false };
+  const strippedOld = oldParsed.stripped;
+  const exactUnique = content.includes(strippedOld) && content.indexOf(strippedOld, content.indexOf(strippedOld) + 1) < 0;
+  if (!exactUnique && findRegion(content, strippedOld).kind !== "match") {
+    return { oldText, newText, stripped: false };
+  }
+  const newParsed = stripSequentialNumbers(newText, oldParsed.count === 1);
+  const shouldStripNew = newParsed !== undefined
+    && (newParsed.count >= 2 || Math.abs(newParsed.firstNum - oldParsed.firstNum) <= 1);
+  return {
+    oldText: strippedOld,
+    newText: shouldStripNew ? newParsed.stripped : newText,
+    stripped: true,
+  };
+}
+
+function findIntroducedElision(oldLF: string, newLF: string): string | undefined {
+  const oldLines = new Set(oldLF.split("\n").map((l) => l.trim()));
+  for (const line of newLF.split("\n")) {
+    if (ELISION_PLACEHOLDER_COMMENT.test(line) && !oldLines.has(line.trim())) return line.trim();
+  }
+  return undefined;
+}
+
+function elisionBracketSpan(content: string, oldLF: string): { firstLine: number; lastLine: number } | undefined {
+  const lines = (oldLF.endsWith("\n") ? oldLF.slice(0, -1) : oldLF).split("\n");
+  const idx = lines.findIndex((line) => STANDALONE_ELISION_LINE.test(line));
+  if (idx <= 0 || idx >= lines.length - 1) return undefined;
+  const head = lines.slice(0, idx).filter((l) => !isBlank(l) && !STANDALONE_ELISION_LINE.test(l));
+  const tail = lines.slice(idx + 1).filter((l) => !isBlank(l) && !STANDALONE_ELISION_LINE.test(l));
+  if (!head.length || !tail.length) return undefined;
+  const headRes = findRegion(content, head.join("\n"));
+  const tailRes = findRegion(content, tail.join("\n"));
+  if (headRes.kind !== "match" || tailRes.kind !== "match") return undefined;
+  if (tailRes.match.lastLine <= headRes.match.firstLine || tailRes.match.lastLine - headRes.match.firstLine > 80) return undefined;
+  return { firstLine: headRes.match.firstLine, lastLine: tailRes.match.lastLine };
 }
 
 interface EditInput { oldText: string; newText: string }
@@ -461,17 +545,47 @@ export function alignToLines(content: string, edits: readonly EditInput[], path:
  * unchanged. Throws a model-facing error for an edit no level can place uniquely.
  */
 export function tolerateEdits(content: string, edits: readonly EditInput[], path: string): ToleratedEdit[] {
+  const maxLine = visibleLineCount(content);
   return edits.map((edit, index) => {
     const label = labelOf(edits.length, index);
-    const old = toLF(edit.oldText);
+    let old = toLF(edit.oldText);
+    let candidateNew = toLF(edit.newText);
     if (!old || piFinds(content, old)) return { ...edit };
-    const result = findRegion(content, old);
+    let strippedNumbers = false;
+    let result = findRegion(content, old);
+    if (result.kind !== "match" || (result.match.level === "similar" && !result.match.pairs.some(([, fileLine]) => COPIED_LINE_NUMBER.test(fileLine)))) {
+      const deNumbered = stripCopiedLineNumbers(content, old, candidateNew);
+      if (deNumbered.stripped) {
+        old = deNumbered.oldText;
+        candidateNew = deNumbered.newText;
+        strippedNumbers = true;
+        if (old === candidateNew) {
+          throw new Error(`No edit needed in ${path}: oldText and newText are identical after stripping copied line numbers. Provide the actual target text to change, or answer directly if all edits are complete.`);
+        }
+        const at = content.indexOf(old);
+        if (at >= 0 && content.indexOf(old, at + 1) < 0) {
+          if (isSingleIndentedLine({ oldText: old, newText: candidateNew })) {
+            const prefix = content.slice(content.lastIndexOf("\n", at - 1) + 1, at);
+            if (/^[ \t]+$/.test(prefix)) {
+              const line = old.endsWith("\n") ? old.slice(0, -1) : old;
+              const { text } = fitReplacement(candidateNew, { pairs: [[line, prefix + line]] });
+              return { oldText: prefix + old, newText: text,
+                note: `Matched ${label} at line ${lineAt(content, at)} of ${path} after stripping copied line numbers and ignoring indentation; re-indented the replacement to the file.` };
+            }
+          }
+          return { oldText: old, newText: candidateNew,
+            note: `Matched ${label} at line ${lineAt(content, at)} of ${path} after stripping copied line numbers.` };
+        }
+        result = findRegion(content, old);
+      }
+    }
     if (result.kind === "match") {
       const { match } = result;
       const exact = content.slice(match.start, match.end);
-      const fit = fitReplacement(edit.newText, match);
+      const fit = fitReplacement(candidateNew, match);
       const range = match.firstLine === match.lastLine ? `line ${match.firstLine}` : `lines ${match.firstLine}-${match.lastLine}`;
       let note = `Matched ${label} at ${range} of ${path} ${LEVEL_TEXT[match.level]}`;
+      if (strippedNumbers) note += " (stripped copied line numbers)";
       if (match.similarity !== undefined) note += ` (${Math.round(match.similarity * 100)}% similar)`;
       if (fit.reindented) note += "; re-indented the replacement to the file";
       if (fit.kept) note += `; kept ${fit.kept} unchanged line(s) as the file has them`;
@@ -479,24 +593,36 @@ export function tolerateEdits(content: string, edits: readonly EditInput[], path
       if (match.level === "similar") note += ` Replaced text:\n${exact}`;
       return { oldText: exact, newText: fit.text, note };
     }
+    const bracketed = elisionBracketSpan(content, old);
+    if (bracketed !== undefined) {
+      const padFirst = Math.max(1, bracketed.firstLine - 1), padLast = Math.min(maxLine, bracketed.lastLine + 1);
+      throw new Error(`Could not apply ${label} in ${path}: oldText contains an elision marker ("..."), which cannot be matched safely. `
+        + `Target only the specific lines changing, or copy oldText verbatim from lines ${bracketed.firstLine}-${bracketed.lastLine}:\n`
+        + excerpt(content, padFirst, padLast));
+    }
     // "Already applied" only when the new text sits (unique, not merely similar) where the old text best resembles.
-    const newLF = toLF(edit.newText);
+    const newLF = candidateNew;
     if (result.kind === "none" && result.closest && newLF.trim().length >= 8) {
       const present = findRegion(content, newLF), { firstLine, lastLine } = result.closest;
       if (present.kind === "match" && present.match.level !== "similar" && present.match.firstLine <= lastLine && present.match.lastLine >= firstLine) {
         throw new Error(`Could not apply ${label} in ${path}: its old text is not in the file, but its new text already is (line ${present.match.firstLine}). `
-          + `The change appears to be applied already. Read ${path} again before editing it further.`);
+          + "The change appears to be applied already; do not repeat this edit. Continue with any remaining changes, or answer directly if all work is done.");
       }
     }
     if (result.kind === "ambiguous") {
+      const snippets = result.lines.slice(0, 3).map((ln) => {
+        const a = Math.max(1, ln - 2), b = Math.min(maxLine, ln + 2);
+        return `[lines ${a}-${b}]\n${excerpt(content, a, b)}`;
+      }).join("\n\n");
       throw new Error(`Could not apply ${label} in ${path}: when ${LEVEL_TEXT[result.level]}, the old text matches ${result.lines.length} places `
-        + `(lines ${result.lines.slice(0, 8).join(", ")}). Include more surrounding lines so it matches exactly one place.`);
+        + `(lines ${result.lines.slice(0, 8).join(", ")}). Include more surrounding lines so it matches exactly one place.\n\n${snippets}`);
     }
     let message = `Could not find ${label} in ${path}. The old text must match the file exactly.`;
     if (result.closest) {
       const { firstLine, lastLine, similarity: score } = result.closest;
+      const padFirst = Math.max(1, firstLine - 2), padLast = Math.min(maxLine, lastLine + 2);
       message += ` The closest text is lines ${firstLine}-${lastLine} (${Math.round(score * 100)}% similar). Copy oldText exactly from these lines:\n`
-        + excerpt(content, firstLine, lastLine);
+        + excerpt(content, padFirst, padLast);
     } else message += ` Nothing similar was found; read ${path} again to see its current content.`;
     throw new Error(message);
   });
@@ -551,17 +677,17 @@ function tolerantLs(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execute
   };
 }
 
-const SYNTAX_CHECK_EXTS = new Set([".json", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py"]);
+const SYNTAX_CHECK_EXTS = new Set([".json", ".js", ".mjs", ".cjs", ".ts", ".mts", ".cts", ".py", ".sh", ".bash"]);
 const stripTsTypes = (nodeModule as { stripTypeScriptTypes?: (code: string, options?: { mode?: string }) => string }).stripTypeScriptTypes;
 const PY_AST_CHECK = "import ast,sys\ntry:\n ast.parse(sys.stdin.read(),sys.argv[1])\nexcept SyntaxError as e:\n print(f'{type(e).__name__}: {e.msg} (line {e.lineno})');sys.exit(1)\n";
 
-function pythonSyntaxCheck(text: string, path: string): Promise<string | undefined> {
+function spawnSyntaxCheck(cmd: string, args: readonly string[], text: string): Promise<string | undefined> {
   return new Promise((resolve) => {
     let out = "", settled = false;
     const finish = (v: string | undefined) => { if (!settled) { settled = true; resolve(v); } };
     let child;
     try {
-      child = spawn("python3", ["-I", "-c", PY_AST_CHECK, path], {
+      child = spawn(cmd, args, {
         stdio: ["pipe", "pipe", "pipe"], timeout: 5_000, env: { PATH: process.env.PATH ?? "/usr/bin:/bin", LC_ALL: "C", LANG: "C" },
       });
     } catch { finish(undefined); return; }
@@ -582,7 +708,8 @@ async function checkFileSyntax(text: string, path: string): Promise<string | und
     try { JSON.parse(text); return ""; }
     catch (error) { return `JSON SyntaxError: ${messageOf(error).split("\n")[0]}`; }
   }
-  if (ext === ".py") return pythonSyntaxCheck(text, path);
+  if (ext === ".py") return spawnSyntaxCheck("python3", ["-I", "-c", PY_AST_CHECK, path], text);
+  if (ext === ".sh" || ext === ".bash") return spawnSyntaxCheck("bash", ["-n"], text);
   if (!stripTsTypes) return undefined;
   try { stripTsTypes(text, { mode: "strip" }); return ""; }
   catch (error) { return `SyntaxError: ${messageOf(error).split("\n")[0]}`; }
@@ -597,16 +724,95 @@ export async function introducedEditSyntaxError(before: string, after: string, p
   return (await checkFileSyntax(before, path)) === "" ? afterErr : undefined;
 }
 
-function previewExactEdits(content: string, edits: readonly EditInput[]): string | undefined {
-  let current = content;
+export interface AppliedEditRange {
+  /** 1-based inclusive start and end line in the post-edit file (`endLine < startLine` when lines were deleted). */
+  readonly startLine: number;
+  readonly endLine: number;
+}
+
+const POST_EDIT_CONTEXT = 2;
+const MAX_POST_EDIT_WINDOW_LINES = 14;
+
+export function previewEditsWithRanges(before: string, edits: readonly EditInput[]): { after: string; ranges: AppliedEditRange[] } | undefined {
+  const located: { start: number; end: number; newLF: string }[] = [];
   for (const edit of edits) {
-    const old = toLF(edit.oldText);
-    if (!old) return undefined;
-    const at = current.indexOf(old);
-    if (at < 0 || current.indexOf(old, at + 1) >= 0) return undefined;
-    current = current.slice(0, at) + toLF(edit.newText) + current.slice(at + old.length);
+    const oldLF = toLF(edit.oldText);
+    if (!oldLF) return undefined;
+    const at = before.indexOf(oldLF);
+    if (at < 0 || before.indexOf(oldLF, at + 1) >= 0) return undefined;
+    located.push({ start: at, end: at + oldLF.length, newLF: toLF(edit.newText) });
   }
-  return current;
+  located.sort((a, b) => a.start - b.start);
+  for (let i = 1; i < located.length; i++) {
+    if (located[i]!.start < located[i - 1]!.end) return undefined;
+  }
+  const countNewlines = (s: string) => {
+    let n = 0;
+    for (let i = 0; i < s.length; i++) if (s.charCodeAt(i) === 10) n++;
+    return n;
+  };
+  let out = "", cursor = 0, currentLine = 1;
+  const ranges: AppliedEditRange[] = [];
+  for (const h of located) {
+    const pre = before.slice(cursor, h.start);
+    out += pre;
+    currentLine += countNewlines(pre);
+    const startLine = currentLine;
+    out += h.newLF;
+    const nl = countNewlines(h.newLF);
+    const span = h.newLF === "" ? 0 : (h.newLF.endsWith("\n") ? nl : nl + 1);
+    ranges.push({ startLine, endLine: startLine + span - 1 });
+    currentLine += nl;
+    cursor = h.end;
+  }
+  out += before.slice(cursor);
+  return { after: out, ranges };
+}
+
+function diffChangedRange(before: string, after: string): AppliedEditRange[] {
+  const a = before.split("\n"), b = after.split("\n");
+  let pre = 0;
+  while (pre < a.length && pre < b.length && a[pre] === b[pre]) pre++;
+  let suf = 0;
+  while (suf < a.length - pre && suf < b.length - pre && a[a.length - 1 - suf] === b[b.length - 1 - suf]) suf++;
+  const startLine = pre + 1;
+  const endLine = b.length - suf;
+  return [{ startLine, endLine: Math.max(startLine - 1, endLine) }];
+}
+
+/** Compact verbatim post-edit micro-window (`±2` context lines, no line-number prefixes) for distance-0 follow-up edits. */
+export function formatPostEditWindow(after: string, ranges: readonly AppliedEditRange[], displayPath: string): string {
+  const maxLine = visibleLineCount(after);
+  if (after === "" || maxLine === 0) return `[${displayPath} is now empty]`;
+  if (!ranges.length) return "";
+  const windows = ranges.map(({ startLine, endLine }) => {
+    const first = Math.max(1, Math.min(maxLine, startLine) - POST_EDIT_CONTEXT);
+    const last = endLine < startLine
+      ? Math.min(maxLine, Math.max(1, startLine - 1) + POST_EDIT_CONTEXT)
+      : Math.min(maxLine, endLine + POST_EDIT_CONTEXT);
+    return { first, last };
+  });
+  const merged: { first: number; last: number }[] = [];
+  for (const win of windows) {
+    const prev = merged.at(-1);
+    if (prev && win.first <= prev.last + 1) prev.last = Math.max(prev.last, win.last);
+    else merged.push({ ...win });
+  }
+  const lines = after.split("\n");
+  const blocks = merged.slice(0, 3).map(({ first, last }) => {
+    const header = first === last ? `[${displayPath} line ${first}]` : `[${displayPath} lines ${first}-${last}]`;
+    const span = last - first + 1;
+    if (span <= MAX_POST_EDIT_WINDOW_LINES) return `${header}\n${lines.slice(first - 1, last).join("\n")}`;
+    const head = lines.slice(first - 1, first + 5).join("\n");
+    const tail = lines.slice(last - 6, last).join("\n");
+    return `${header}\n${head}\n... (${span - 12} lines omitted) ...\n${tail}`;
+  });
+  if (merged.length > 3) blocks.push(`... (${merged.length - 3} more edited region(s) omitted)`);
+  return blocks.join("\n\n");
+}
+
+function previewExactEdits(content: string, edits: readonly EditInput[]): string | undefined {
+  return previewEditsWithRanges(content, edits)?.after;
 }
 
 function tolerantEdit(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execute {
@@ -614,10 +820,13 @@ function tolerantEdit(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execu
     const edits: EditInput[] | undefined = Array.isArray(args?.edits) ? args.edits : undefined;
     const ext = typeof args?.path === "string" ? posix.extname(args.path).toLowerCase() : "";
     let cachedContent: string | undefined;
+    const readRaw = async () => {
+      const raw = (await fs.readFile(resolveIn(ctx?.cwd || baseCwd, args.path))).toString("utf8");
+      return toLF(raw.startsWith("﻿") ? raw.slice(1) : raw);
+    };
     const read = async () => {
       if (cachedContent !== undefined) return cachedContent;
-      const raw = (await fs.readFile(resolveIn(ctx?.cwd || baseCwd, args.path))).toString("utf8");
-      cachedContent = toLF(raw.startsWith("﻿") ? raw.slice(1) : raw);
+      cachedContent = await readRaw();
       return cachedContent;
     };
     const guardSyntax = async (candidateEdits: readonly EditInput[] | undefined) => {
@@ -634,13 +843,26 @@ function tolerantEdit(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execu
     const notesOf = (list: ToleratedEdit[]) => list.flatMap((edit) => (edit.note ? [edit.note] : []));
     const strip = (list: ToleratedEdit[]) => list.map(({ oldText, newText }) => ({ oldText, newText }));
     let input = args, notes: string[] = [];
-    if (edits?.some(isSingleIndentedLine)) {
-      const content = await read().catch(() => undefined);
-      const aligned = content === undefined ? [] : alignToLines(content, edits, args.path);
+    if (edits?.some((e) => typeof e?.oldText === "string" && typeof e?.newText === "string" && e.oldText !== "" && toLF(e.oldText) === toLF(e.newText))) {
+      throw new Error(`No edit needed in ${args.path}: oldText and newText are identical, so the file would not change. Provide the actual target text to change, or answer directly if all edits are complete.`);
+    }
+    if (edits) {
+      for (const e of edits) {
+        if (typeof e?.oldText !== "string" || typeof e?.newText !== "string") continue;
+        const placeholder = findIntroducedElision(toLF(e.oldText), toLF(e.newText));
+        if (placeholder !== undefined) {
+          throw new Error(`Could not apply edit in ${args.path}: newText contains an elision placeholder ("${placeholder}"), which would delete code. Write complete replacement lines or narrow oldText to only the lines changing.`);
+        }
+      }
+    }
+    const beforeContent = edits?.length ? await read().catch(() => undefined) : undefined;
+    if (edits?.some(isSingleIndentedLine) && beforeContent !== undefined) {
+      const aligned = alignToLines(beforeContent, edits, args.path);
       notes = notesOf(aligned);
       if (notes.length) input = { ...args, edits: strip(aligned) };
     }
     await guardSyntax(input.edits);
+    let appliedEdits: readonly EditInput[] | undefined = input.edits;
     let result;
     try {
       result = await execute(id, input, signal, onUpdate, ctx);
@@ -652,7 +874,16 @@ function tolerantEdit(execute: Execute, baseCwd: string, fs: WorkspaceFs): Execu
       const stripped = strip(tolerated);
       await guardSyntax(stripped);
       result = await execute(id, { ...args, edits: stripped }, signal, onUpdate, ctx);
+      appliedEdits = stripped;
       notes = [...notes, ...more];
+    }
+    if (beforeContent !== undefined && appliedEdits?.length && typeof args?.path === "string") {
+      const preview = previewEditsWithRanges(beforeContent, appliedEdits);
+      const resolved = preview ?? await readRaw().then((after) => ({ after, ranges: diffChangedRange(beforeContent, after) })).catch(() => undefined);
+      if (resolved !== undefined) {
+        const snippet = formatPostEditWindow(resolved.after, resolved.ranges, args.path);
+        if (snippet) notes = [...notes, snippet];
+      }
     }
     return notes.length ? annotate(result, notes.join("\n"), "after") : result;
   };

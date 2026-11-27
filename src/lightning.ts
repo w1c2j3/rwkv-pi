@@ -1,4 +1,5 @@
 import type { RwkvConfig } from "./config.js";
+import { countTokensLocal } from "./local-tokenizer.js";
 import { promptForRequest, STOP_TEXTS } from "./prompt.js";
 import { ContinuationParser } from "./xml.js";
 
@@ -12,12 +13,20 @@ function mergeHeader(headers: HeadersInit | undefined, name: string, value: stri
 }
 
 export async function countPrompt(prompt: string, config: RwkvConfig, fetcher: typeof fetch, signal?: AbortSignal | null): Promise<number> {
-  const response = await fetcher(config.baseUrl + "/tokens/count", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ text: prompt }), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(30000)]) : AbortSignal.timeout(30000) });
+  const response = await fetcher(config.baseUrl + "/tokens/count", { method: "POST", headers: { "Content-Type": "application/json", Authorization: `Bearer ${config.apiKey}` }, body: JSON.stringify({ text: prompt }), signal: signal ? AbortSignal.any([signal, AbortSignal.timeout(120000)]) : AbortSignal.timeout(120000) });
   if (!response.ok) throw new Error(`Lightning tokenizer returned HTTP ${response.status}.`);
   const data = await response.json() as any;
   const count = data.count ?? data.token_count ?? data.tokens;
   if (!Number.isSafeInteger(count) || count < 1) throw new Error("Invalid Lightning token count.");
   return count;
+}
+
+async function countFast(text: string, config: RwkvConfig, fetcher: typeof fetch, signal?: AbortSignal | null): Promise<number> {
+  if (config.localTokenizer !== false) {
+    const local = countTokensLocal(text);
+    if (local !== undefined && local >= 1) return local;
+  }
+  return countPrompt(text, config, fetcher, signal);
 }
 
 /** Local fetch adapter: the remote server receives only raw continuation text. */
@@ -27,7 +36,7 @@ export function lightningFetch(config: RwkvConfig, fetcher: typeof fetch): typeo
     const chat = JSON.parse(init.body);
     const format = config.toolFormat === "json" ? "json" : "xml";
     const { prompt, thinking } = promptForRequest(chat, format);
-    const count = await countPrompt(prompt, config, fetcher, init.signal);
+    const count = await countFast(prompt, config, fetcher, init.signal);
     const max = Math.min(chat.max_tokens ?? config.maxTokens, config.maxTokens, config.contextWindow - count);
     if (!Number.isSafeInteger(max) || max < 1) throw new Error("RWKV context exhausted; input truncation is disabled.");
     const hasTools = Array.isArray(chat.tools) && chat.tools.length > 0;
@@ -35,14 +44,14 @@ export function lightningFetch(config: RwkvConfig, fetcher: typeof fetch): typeo
       model: config.modelId, contents: [prompt], stream: true, max_tokens: max,
       // A raw continuation must hand control back before a generated User turn.
       // This server includes matched text stops; the client removes that suffix.
-      stop: STOP_TEXTS, force_reasoning: false, chunk_size: 2, metrics: true,
-      // Stabilized tool-calling profile (terminus2 / RWKV-Agent) prevents JSON syntax drift
-      // and zero-penalty RNN repetition loops; non-tool turns keep Open Think / Fake Think.
-      temperature: hasTools ? 0.3 : thinking ? 0.96 : 1.0,
-      top_p: hasTools ? 0.5 : thinking ? 0.76 : 0.28,
+      stop: STOP_TEXTS, force_reasoning: false, chunk_size: 4, metrics: false,
+      // Stabilized tool-calling profile aligned with AGENT_FAST (`T=0.5, top_p=0.7`): avoids
+      // post-temperature `top_p=0.5` greedy collapse and cross-turn `<think>` cloning on RWKV-7.
+      temperature: hasTools ? 0.5 : thinking ? 0.96 : 1.0,
+      top_p: hasTools ? 0.7 : thinking ? 0.76 : 0.28,
       top_k: hasTools ? 65536 : 32,
-      alpha_presence: hasTools ? 0.5 : thinking ? 1 : 0,
-      alpha_frequency: hasTools ? 0.1 : thinking ? 0.1 : 0,
+      alpha_presence: hasTools ? 0.8 : thinking ? 1 : 0,
+      alpha_frequency: hasTools ? 0.2 : thinking ? 0.1 : 0,
       alpha_decay: hasTools ? 0.996 : thinking ? 0.988 : 0.996,
     };
     if (config.sampling) {
@@ -113,7 +122,7 @@ export function lightningFetch(config: RwkvConfig, fetcher: typeof fetch): typeo
           const parsed = parser.finish(finish, matchedStop);
           // Text-stop tokens were generated and consumed by the native model,
           // even though their display suffix is removed by the client parser.
-          const completionTokens = generated ? await countPrompt(generated, config, fetcher, signal) : 0;
+          const completionTokens = generated ? await countFast(generated, config, fetcher, signal) : 0;
           for (const delta of parsed.deltas) send(chunk(delta));
           send(chunk({}, parsed.reason));
           send({ ...chunk({}), choices: [], usage: { prompt_tokens: count, completion_tokens: completionTokens, total_tokens: count + completionTokens } });

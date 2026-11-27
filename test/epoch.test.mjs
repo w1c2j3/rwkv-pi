@@ -83,6 +83,21 @@ test("epoch mode: folds older steps into deterministic State Ledger, pins unedit
   assert.match(p1, /Failed attempts \(do not repeat verbatim\): read src\/missing\.ts/);
   assert.match(p1, /PINNED_UNEDITED_HELPER/, "unedited Working Set read stays pinned across fold");
 
+  // Verify multiple folded bash commands retain distinct earlier bash summaries so the model never forgets prior checks
+  const multiBash = foldEpochRequest({
+    messages: [
+      { role: "system", content: "You are pi." },
+      { role: "user", content: "Create test-rwkv." },
+      ...callPair("b1", "bash", { command: "git status" }, "fatal: not a git repository\nCommand exited with code 128", "Check git."),
+      ...callPair("b2", "bash", { command: "ls -la test-rwkv" }, "test-rwkv 不存在\nexit code: 0", "Check dir."),
+      ...callPair("b3", "bash", { command: "ls -la ." }, `${big}\ntotal 76\nexit code: 0`, "List cwd."),
+      ...callPair("b4", "bash", { command: "pwd" }, "/workspace\nexit code: 0", "Print cwd."),
+    ],
+    tools: piBaseTools,
+  }, { budgetTokens: 1200, keepRecentPairs: 1 });
+  const multiPrompt = renderPrompt(multiBash.request.messages, piBaseTools, true);
+  assert.match(multiPrompt, /Earlier commands \(already run, do not repeat\):.*git status -> exit 128.*ls -la test-rwkv -> exit 0 \(test-rwkv 不存在\)/);
+
   // Verify DeepSeek Reasoner strict API invariants: ZERO consecutive user messages, and reasoning_content="" on stripped tool turns!
   for (let i = 1; i < f1.request.messages.length; i++) {
     assert.ok(

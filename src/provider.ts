@@ -40,11 +40,18 @@ export function createRwkvModel(config: RwkvConfig = readConfig()): Model<"opena
   };
 }
 
-export function createRwkvProvider(config: RwkvConfig = readConfig()): Provider<"openai-completions"> & {
+export interface CreateRwkvProviderOptions {
+  readonly onPayloadMessages?: (messages: readonly Record<string, any>[]) => void;
+}
+
+export function createRwkvProvider(
+  config: RwkvConfig = readConfig(),
+  options?: CreateRwkvProviderOptions,
+): Provider<"openai-completions"> & {
   rwkvPiToolFormat: RwkvConfig["toolFormat"]; rwkvPiRepeatFailureLimit: number; rwkvPiToolCallRecovery: boolean; rwkvPiIdenticalCallLimit: number;
-  rwkvPiTargetFailureLimit: number; rwkvPiToolTolerance: boolean; rwkvPiHistoryMode: RwkvConfig["historyMode"]; rwkvPiTransportFolded: boolean;
+  rwkvPiTargetFailureLimit: number; rwkvPiToolTolerance: boolean; rwkvPiEditMode: RwkvConfig["editMode"]; rwkvPiHistoryMode: RwkvConfig["historyMode"]; rwkvPiTransportFolded: boolean;
 } {
-  const api = withRwkvTransport(openAICompletionsApi(), config.repeatFailureLimit, config);
+  const api = withRwkvTransport(openAICompletionsApi(), config.repeatFailureLimit, config, options?.onPayloadMessages);
   return Object.assign(createProvider({
     id: "rwkv",
     name: config.backend === "lightning" ? "RWKV / Lightning CUDA" : "RWKV / OpenAI compatibility",
@@ -66,5 +73,5 @@ export function createRwkvProvider(config: RwkvConfig = readConfig()): Provider<
   }), { rwkvPiToolFormat: config.toolFormat, rwkvPiRepeatFailureLimit: config.repeatFailureLimit,
     rwkvPiToolCallRecovery: config.backend === "lightning" && config.toolCallRecovery, rwkvPiIdenticalCallLimit: config.identicalCallLimit,
     rwkvPiTargetFailureLimit: config.targetFailureLimit, rwkvPiToolTolerance: config.toolTolerance,
-    rwkvPiHistoryMode: config.historyMode, rwkvPiTransportFolded: true });
+    rwkvPiEditMode: config.editMode, rwkvPiHistoryMode: config.historyMode, rwkvPiTransportFolded: true });
 }

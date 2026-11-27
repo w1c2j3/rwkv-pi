@@ -18,6 +18,7 @@ import { runtimeProvenance } from "./provenance.js";
 import { createRwkvProvider } from "./provider.js";
 import { object } from "./tasks.js";
 import { budgetRwkvRequest, type TokenBudget } from "./token-budget.js";
+import { createLineModeTools, type EditMode, LineViewTracker } from "./line-edit.js";
 import { MAX_LISTED_FILES, SKIPPED_DIRECTORIES, TOLERANT_TOOL_NAMES, withTolerance, type WorkspaceFs } from "./tolerant-tools.js";
 import { DEFAULT_PI_TOOLS, parseToolList, PI_TOOL_NAMES, type PiToolName } from "./tools.js";
 import { createWebTools } from "./web-tools.js";
@@ -386,6 +387,7 @@ export async function discoverHarborTasks(tasksRoot: string): Promise<HarborTask
 export interface SplitDockerfileResult {
   baseDockerfile: string;
   copiesWorkspaceOnly: boolean;
+  runsInitScript?: boolean;
 }
 
 function logicalDockerfileInstructions(normalized: string): { rawLines: string[]; joined: string }[] {
@@ -411,20 +413,23 @@ function logicalDockerfileInstructions(normalized: string): { rawLines: string[]
   return out;
 }
 
+const IGNORABLE_RAE_METADATA_COPY = /^COPY(?:\s+--chown=\S+)?\s+(?:turns\.json|web\.json)\s+\/rae\/(?:turns\.json|web\.json)\s*$/i;
+
 /**
  * Identifies Dockerfiles that either have zero COPY/ADD instructions or only a trailing
- * `COPY workspace/ /app/`, allowing hundreds of tasks to share a single cached base image
- * built in an empty context while seeding `/app` at container startup.
+ * `COPY workspace/ /app/` (plus optional `/rae/{turns,web}.json` harness metadata copies),
+ * allowing hundreds of tasks to share a single cached base image while seeding `/app` at startup.
  */
 export function splitReusableDockerfile(dockerfileText: string): SplitDockerfileResult | undefined {
   const normalized = dockerfileText.replaceAll("\r\n", "\n");
-  const instructions = logicalDockerfileInstructions(normalized);
+  const instructions = logicalDockerfileInstructions(normalized).filter((inst) => !IGNORABLE_RAE_METADATA_COPY.test(inst.joined));
   const copyIndices: number[] = [];
   for (let i = 0; i < instructions.length; i++) {
     if (/^(?:COPY|ADD)\s+/i.test(instructions[i]!.joined)) copyIndices.push(i);
   }
   if (copyIndices.length === 0) {
-    return { baseDockerfile: normalized.trimEnd() + "\n", copiesWorkspaceOnly: false };
+    const kept = instructions.flatMap((inst) => inst.rawLines).join("\n").trimEnd() + "\n";
+    return { baseDockerfile: kept, copiesWorkspaceOnly: false };
   }
   if (copyIndices.length === 1 && copyIndices[0] === instructions.length - 1) {
     const last = instructions[copyIndices[0]!]!;
@@ -432,6 +437,17 @@ export function splitReusableDockerfile(dockerfileText: string): SplitDockerfile
       const kept = instructions.slice(0, -1).flatMap((inst) => inst.rawLines).join("\n").trimEnd() + "\n";
       return { baseDockerfile: kept, copiesWorkspaceOnly: true };
     }
+  }
+  if (
+    copyIndices.length === 2
+    && copyIndices[0] === instructions.length - 3
+    && copyIndices[1] === instructions.length - 2
+    && /^COPY(?:\s+--chown=\S+)?\s+workspace\/?\s+\/app\/?\s*$/i.test(instructions[copyIndices[0]!]!.joined)
+    && /^COPY(?:\s+--chown=\S+)?\s+init\.sh\s+\/tmp\/_init\.sh\s*$/i.test(instructions[copyIndices[1]!]!.joined)
+    && /^RUN\s+bash\s+\/tmp\/_init\.sh\s*&&\s*rm\s+-f\s+\/tmp\/_init\.sh\s*$/i.test(instructions.at(-1)!.joined)
+  ) {
+    const kept = instructions.slice(0, -3).flatMap((inst) => inst.rawLines).join("\n").trimEnd() + "\n";
+    return { baseDockerfile: kept, copiesWorkspaceOnly: true, runsInitScript: true };
   }
   return undefined;
 }
@@ -443,7 +459,7 @@ async function hashDirectoryManifest(dir: string): Promise<string> {
     try { entries = await readdir(current, { withFileTypes: true }); } catch { return; }
     entries.sort((a, b) => byCodePoint(a.name, b.name));
     for (const entry of entries) {
-      if (entry.name === "turns.json" && relPrefix === "") continue;
+      if ((entry.name === "turns.json" || entry.name === "web.json") && relPrefix === "") continue;
       const full = join(current, entry.name);
       const rel = relPrefix ? `${relPrefix}/${entry.name}` : entry.name;
       if (entry.isDirectory()) {
@@ -463,6 +479,7 @@ async function hashDirectoryManifest(dir: string): Promise<string> {
 export interface PreparedTaskImage {
   imageTag: string;
   seedWorkspaceDir?: string;
+  seedInitScriptPath?: string;
   isContextSpecific: boolean;
 }
 
@@ -533,6 +550,23 @@ export class HarborImageCache {
     const dockerfileRaw = await readFile(task.environment.dockerfilePath!, "utf8");
     const split = splitReusableDockerfile(dockerfileRaw);
     if (split) {
+      const wsCandidate = join(task.environment.contextDir, "workspace");
+      const initCandidate = join(task.environment.contextDir, "init.sh");
+      const seed = {
+        ...(split.copiesWorkspaceOnly && existsSync(wsCandidate) ? { seedWorkspaceDir: wsCandidate } : {}),
+        ...(split.runsInitScript && existsSync(initCandidate) ? { seedInitScriptPath: initCandidate } : {}),
+      };
+      if (task.environment.dockerImage) {
+        const preferredTag = task.environment.dockerImage;
+        const localOk = await this.once(`local:${preferredTag}`, async () => {
+          const inspect = await runProcess("docker", ["image", "inspect", preferredTag], { timeoutMs: 15_000 });
+          if (inspect.exitCode !== 0) throw new Error("missing");
+          return preferredTag;
+        }).then(() => true, () => false);
+        if (localOk) {
+          return { imageTag: preferredTag, ...seed, isContextSpecific: false };
+        }
+      }
       const digest = createHash("sha256").update(split.baseDockerfile).digest("hex").slice(0, 12);
       const imageTag = `rwkv-pi-harbor-cache:${digest}`;
       await this.once(imageTag, async () => {
@@ -555,10 +589,9 @@ export class HarborImageCache {
           await rm(emptyCtx, { recursive: true, force: true });
         }
       });
-      const wsCandidate = join(task.environment.contextDir, "workspace");
       return {
         imageTag,
-        ...(split.copiesWorkspaceOnly && existsSync(wsCandidate) ? { seedWorkspaceDir: wsCandidate } : {}),
+        ...seed,
         isContextSpecific: false,
       };
     }
@@ -700,6 +733,7 @@ done`;
 export interface DockerSandboxStartOptions {
   imageTag: string;
   seedWorkspaceDir?: string;
+  seedInitScriptPath?: string;
   cpus: number;
   memoryMb: number;
   networkMode: "bridge" | "none" | "host";
@@ -743,7 +777,7 @@ export class PersistentDockerSandbox implements HarborSandbox {
       throw new Error(`Failed to start Docker container (${options.imageTag}): ${started.stderr.toString().trim()}`);
     }
     try {
-      const probe = await runProcess("docker", ["exec", containerName, "/bin/sh", "-c", "mkdir -p -- \"$1\" /logs/agent /logs/verifier && rm -rf /rae /tests && if [ -x /bin/bash ]; then printf bash; else printf sh; fi", "sh", cwd], { timeoutMs: 20_000 });
+      const probe = await runProcess("docker", ["exec", containerName, "/bin/sh", "-c", "mkdir -p -- \"$1\" /logs/agent /logs/verifier && rm -rf /rae /tests && ([ \"$1\" = /workspace ] || [ -e /workspace ] || ln -s -- \"$1\" /workspace 2>/dev/null || true) && if [ -x /bin/bash ]; then printf bash; else printf sh; fi", "sh", cwd], { timeoutMs: 20_000 });
       if (probe.exitCode !== 0) {
         throw new Error(`Container probe failed: ${probe.stderr.toString().trim()}`);
       }
@@ -751,7 +785,16 @@ export class PersistentDockerSandbox implements HarborSandbox {
       if (options.seedWorkspaceDir) {
         await sandbox.uploadDir(options.seedWorkspaceDir, cwd);
       }
-      await sandbox.exec(["/bin/sh", "-c", "rm -rf /rae /tests \"$1/turns.json\"", "sh", cwd], { timeoutMs: 10_000 });
+      if (options.seedInitScriptPath) {
+        const initScript = await readFile(options.seedInitScriptPath);
+        await sandbox.writeFile("/tmp/_init.sh", initScript);
+        const initRes = await sandbox.exec(["/bin/bash", "/tmp/_init.sh"], { cwd, timeoutMs: 60_000 });
+        await sandbox.exec(["/bin/sh", "-c", "rm -f /tmp/_init.sh"], { timeoutMs: 5_000 });
+        if (initRes.exitCode !== 0) {
+          throw new Error(`Container init.sh failed: ${(initRes.stdout.toString() + initRes.stderr.toString()).slice(-800)}`);
+        }
+      }
+      await sandbox.exec(["/bin/sh", "-c", 'rm -rf /rae /tests "$1/turns.json" "$1/web.json"', "sh", cwd], { timeoutMs: 10_000 });
       return sandbox;
     } catch (error) {
       await runProcess("docker", ["rm", "-f", containerName], { timeoutMs: 15_000 }).catch(() => {});
@@ -840,6 +883,7 @@ export class PersistentDockerSandbox implements HarborSandbox {
 
   readonly fs: WorkspaceFs = {
     readFile: (path) => this.readFile(path),
+    writeFile: (path, content) => this.writeFile(path, content),
     exists: (path) => this.exists(path),
     listFiles: (root) => this.listFiles(root),
   };
@@ -918,6 +962,7 @@ export interface HarborTrialRecord {
   sessionId: string;
   model: string;
   promptVersion?: string;
+  editMode?: EditMode;
   historyMode: "full" | "epoch" | "worklist";
   thinkingLevel: "high" | "off";
   status: HarborTrialStatus;
@@ -951,6 +996,8 @@ export interface HarborSummary {
     infraErrors: number;
     passed: number;
     meanReward: number;
+    totalPoints: number;
+    maxPoints: number;
     passAtK: number;
     avgRequests: number;
   };
@@ -977,6 +1024,7 @@ export interface HarborBenchmarkOptions {
   tools?: readonly PiToolName[];
   enableWebTools?: boolean;
   webTools?: ToolDefinition[];
+  editMode?: EditMode;
   historyMode?: "full" | "epoch" | "worklist";
   thinkingLevel?: "high" | "off";
   maxRequests?: number;
@@ -992,7 +1040,7 @@ export interface HarborBenchmarkOptions {
 }
 
 function isInfraTransportError(message: string): boolean {
-  return /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|UND_ERR_CONNECT|fetch failed|Lightning tokenizer returned HTTP 5\d\d/i.test(message);
+  return /ECONNREFUSED|ECONNRESET|EHOSTUNREACH|ENETUNREACH|EPIPE|UND_ERR_CONNECT|UND_ERR_SOCKET|UND_ERR_HEADERS_TIMEOUT|UND_ERR_BODY_TIMEOUT|fetch failed|socket hang up|The operation was aborted due to timeout|Request timed out|Incomplete Lightning stream|Lightning tokenizer returned HTTP 5\d\d/i.test(message);
 }
 
 function assistantText(msg: AssistantMessage | undefined): string {
@@ -1001,6 +1049,56 @@ function assistantText(msg: AssistantMessage | undefined): string {
     .filter((b): b is { type: "text"; text: string } => b.type === "text" && typeof b.text === "string")
     .map((b) => b.text)
     .join("");
+}
+
+const PY_WORKSPACE_SNAPSHOT = `import hashlib, json, os, sys
+root = sys.argv[1]
+skip = {'.git', 'node_modules', '.venv', 'venv', '__pycache__', '.pytest_cache', '.mypy_cache'}
+hashes, files = {}, {}
+if os.path.isdir(root):
+  for cur, dirs, names in os.walk(root):
+    dirs[:] = sorted(d for d in dirs if d not in skip)
+    for name in sorted(names):
+      if name.endswith('.pyc'): continue
+      full = os.path.join(cur, name)
+      if os.path.islink(full) and not os.path.isfile(full): continue
+      try:
+        st = os.stat(full)
+        if st.st_size > 2 * 1024 * 1024: continue
+        with open(full, 'rb') as f: raw = f.read()
+      except OSError:
+        continue
+      rel = os.path.relpath(full, root).replace(os.sep, '/')
+      text = raw.decode('utf-8', errors='replace')
+      hashes[rel] = hashlib.sha256(text.encode('utf-8')).hexdigest()
+      files[rel] = text
+sys.stdout.write(json.dumps({'hashes': hashes, 'files': files}, ensure_ascii=False))
+`;
+
+async function snapshotHarborWorkspace(sandbox: HarborSandbox): Promise<{ hashes: Record<string, string>; files: Record<string, string> }> {
+  const fast = await sandbox.exec(["python3", "-c", PY_WORKSPACE_SNAPSHOT, sandbox.cwd], { cwd: sandbox.cwd, timeoutMs: 25_000 }).catch(() => undefined);
+  if (fast && fast.exitCode === 0) {
+    try {
+      const parsed = JSON.parse(fast.stdout.toString("utf8")) as { hashes?: Record<string, string>; files?: Record<string, string> };
+      if (parsed && object(parsed.hashes) && object(parsed.files)) {
+        return { hashes: parsed.hashes as Record<string, string>, files: parsed.files as Record<string, string> };
+      }
+    } catch { /* fall back to POSIX file list */ }
+  }
+  const hashes: Record<string, string> = {};
+  const files: Record<string, string> = {};
+  const relPaths = await sandbox.fs.listFiles(sandbox.cwd).catch(() => [] as string[]);
+  for (const rel of relPaths) {
+    if (rel.endsWith(".pyc")) continue;
+    try {
+      const buf = await sandbox.readFile(posix.join(sandbox.cwd, rel));
+      if (buf.length > 2 * 1024 * 1024) continue;
+      const text = buf.toString("utf8");
+      hashes[rel] = createHash("sha256").update(text, "utf8").digest("hex");
+      files[rel] = text;
+    } catch { /* skip unreadable */ }
+  }
+  return { hashes, files };
 }
 
 function serializeHarborEventLines(
@@ -1102,7 +1200,10 @@ function buildSummary(
     });
 
   const validTasks = tasks.filter((t) => t.statuses.some((s) => s !== "infra_error"));
-  const meanReward = valid.length ? valid.reduce((s, r) => s + r.reward, 0) / valid.length : 0;
+  const rewardSum = valid.reduce((s, r) => s + r.reward, 0);
+  const meanReward = valid.length ? rewardSum / valid.length : 0;
+  const totalPoints = Number((rewardSum * 10).toFixed(2));
+  const maxPoints = valid.length * 10;
   const passAtK = validTasks.length ? validTasks.filter((t) => t.passedAny).length / validTasks.length : 0;
   const avgRequests = valid.length ? valid.reduce((s, r) => s + r.requests, 0) / valid.length : 0;
 
@@ -1123,6 +1224,8 @@ function buildSummary(
       infraErrors,
       passed: valid.filter((r) => r.reward >= 1).length,
       meanReward: Number(meanReward.toFixed(6)),
+      totalPoints,
+      maxPoints,
       passAtK: Number(passAtK.toFixed(6)),
       avgRequests: Number(avgRequests.toFixed(2)),
     },
@@ -1138,7 +1241,7 @@ function renderScoreboardMarkdown(summary: HarborSummary): string {
     ``,
     `- **Model**: \`${summary.model}\``,
     `- **Progress**: \`${summary.totals.finished} / ${summary.totals.planned}\` (Valid: \`${summary.totals.valid}\`, Infra Errors: \`${summary.totals.infraErrors}\`)`,
-    `- **Mean Reward (avg@${summary.repetitions})**: **${pct(summary.totals.meanReward)}**`,
+    `- **Score**: **${summary.totals.totalPoints.toFixed(2)} / ${summary.totals.maxPoints}** (**${pct(summary.totals.meanReward)}** mean reward)`,
     `- **Pass@${summary.repetitions} (reward = 1.0)**: **${pct(summary.totals.passAtK)}** (\`${summary.totals.passed}/${summary.totals.valid}\` trials)`,
     `- **Avg Requests / Trial**: \`${summary.totals.avgRequests}\``,
     `- **Config**: concurrency=\`${summary.concurrency}\`, endpoints=\`${summary.endpoints.length}\`, history=\`${summary.historyMode}\`, thinking=\`${summary.thinkingLevel}\``,
@@ -1158,6 +1261,7 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
   const repetitions = Math.max(1, Math.trunc(options.repetitions ?? 1));
   const maxRequests = Math.max(1, Math.trunc(options.maxRequests ?? 48));
   const thinkingLevel = options.thinkingLevel ?? "high";
+  const effectiveEditMode: EditMode = options.editMode ?? baseConfig.editMode;
   const effectiveHistoryMode = options.historyMode ?? baseConfig.historyMode;
   const piTools = parseToolList(options.tools ?? DEFAULT_PI_TOOLS);
   const endpointsList = options.endpoints?.length ? [...options.endpoints] : [baseConfig.baseUrl];
@@ -1229,6 +1333,7 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
       ...baseConfig,
       baseUrl: lease.endpoint,
       sessionId: lease.sessionId,
+      editMode: effectiveEditMode,
       historyMode: effectiveHistoryMode,
     };
     const provider = createRwkvProvider(trialConfig);
@@ -1266,6 +1371,7 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
           const sandbox = await PersistentDockerSandbox.start({
             imageTag: prepared.imageTag,
             seedWorkspaceDir: prepared.seedWorkspaceDir,
+            seedInitScriptPath: prepared.seedInitScriptPath,
             cpus: job.task.environment.cpus,
             memoryMb: job.task.environment.memoryMb,
             networkMode: netMode,
@@ -1312,10 +1418,21 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
       modelRuntime.registerNativeProvider(provider);
 
       const rawTools = sandbox.tools(piTools);
-      const baseTools = trialConfig.toolTolerance
-        ? rawTools.map((t) => (TOLERANT_TOOL_NAMES.includes(t.name) ? withTolerance(t, sandbox.cwd, sandbox.fs) : t))
-        : rawTools;
-      const extraWebTools = options.webTools ?? (options.enableWebTools ? createWebTools() : []);
+      const lineTracker = effectiveEditMode === "line" ? new LineViewTracker() : undefined;
+      const baseTools = effectiveEditMode === "line"
+        ? createLineModeTools(rawTools, sandbox.cwd, sandbox.fs, { tolerance: trialConfig.toolTolerance, tracker: lineTracker })
+        : (trialConfig.toolTolerance
+            ? rawTools.map((t) => (TOLERANT_TOOL_NAMES.includes(t.name) ? withTolerance(t, sandbox.cwd, sandbox.fs) : t))
+            : rawTools);
+      const extraWebTools = options.webTools ?? (options.enableWebTools
+        ? createWebTools(process.env, {
+            onSpill: async (url, content) => {
+              const spillPath = `/tmp/dsh-spill-${createHash("sha256").update(url).digest("hex").slice(0, 12)}.txt`;
+              await sandbox.writeFile(spillPath, content);
+              return spillPath;
+            },
+          })
+        : []);
       const worklistMode = effectiveHistoryMode === "worklist";
       const worklistState = worklistMode ? new PiWorklistState() : undefined;
       const customTools = [...baseTools, ...extraWebTools, ...(worklistState ? createWorklistTools(worklistState) : [])];
@@ -1342,7 +1459,7 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
           const { name, arguments: args } = ctx.toolCall;
           const reason = (worklistMode ? repeatedWorklistSpin(msgs, name) : undefined)
             ?? (identicalCallLimit ? repeatedIdenticalCall(msgs, name, args, identicalCallLimit) : undefined)
-            ?? (targetFailureLimit ? repeatedTargetFailure(msgs, name, args, targetFailureLimit) : undefined);
+            ?? (targetFailureLimit ? repeatedTargetFailure(msgs, name, args, targetFailureLimit, effectiveEditMode) : undefined);
           if (reason) return { block: true, reason };
           if (worklistState && !isWorklistTool(name)) worklistState.recordWorkspaceTool();
           return prevBefore?.(ctx, sig);
@@ -1350,12 +1467,13 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
       }
 
       let interrupted: "budget_exhausted" | "agent_timeout" | undefined;
-      const budgetController = new AbortController();
+      let turnRequests = 0;
+      let stepBudgetController = new AbortController();
       const prevPayload = session.agent.onPayload;
       session.agent.onPayload = async (payload, reqModel) => {
-        if (requests >= maxRequests) {
+        if (turnRequests >= maxRequests) {
           interrupted = "budget_exhausted";
-          throw new Error("Harbor trial request budget exhausted.");
+          throw new Error(`Harbor turn request budget (${maxRequests}) exhausted.`);
         }
         const updated = await prevPayload?.(payload, reqModel);
         let request: Record<string, unknown> = (updated ?? payload) as Record<string, unknown>;
@@ -1363,20 +1481,36 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
           if (effectiveHistoryMode === "epoch") request = foldEpochRequest(request).request;
           else if (effectiveHistoryMode === "worklist") request = foldWorklistRequest(request).request;
         }
-        const prepared: { request: Record<string, unknown>; budget: TokenBudget } = await budgetRwkvRequest(request, trialConfig, budgetController.signal);
+        const prepared: { request: Record<string, unknown>; budget: TokenBudget } = await budgetRwkvRequest(request, trialConfig, stepBudgetController.signal);
+        if (Array.isArray(prepared.request.messages)) {
+          lineTracker?.syncWithActiveMessages(prepared.request.messages as Record<string, any>[]);
+        }
+        turnRequests++;
         requests++;
         return prepared.request;
       };
 
+      let turnAssistant: AssistantMessage | undefined;
       const unsubscribe = session.subscribe((event) => {
         if (event.type !== "message_end") return;
         const msg = event.message;
         if (msg.role === "assistant") {
+          turnAssistant = msg;
           finalAssistant = msg;
           for (const block of msg.content) {
             if (block.type === "thinking" && block.thinking) harborEvents.push({ type: "reasoning", text: block.thinking });
             else if (block.type === "text" && block.text) harborEvents.push({ type: "text", text: block.text });
-            else if (block.type === "toolCall") harborEvents.push({ type: "tool_call", id: block.id, name: block.name, arguments: block.arguments });
+            else if (block.type === "toolCall") {
+              harborEvents.push({
+                type: "tool_call",
+                id: block.id,
+                callId: block.id,
+                name: block.name,
+                tool: block.name,
+                arguments: block.arguments,
+                input: block.arguments,
+              });
+            }
           }
         } else if (msg.role === "toolResult") {
           const text = Array.isArray(msg.content)
@@ -1385,16 +1519,21 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
           harborEvents.push({
             type: "tool_result",
             toolCallId: msg.toolCallId,
+            callId: msg.toolCallId,
             toolName: msg.toolName,
+            tool: msg.toolName,
             isError: Boolean(msg.isError),
             text: text.slice(0, 16_384),
           });
         }
       });
 
+      let firstTurnIssue: { status: HarborTrialStatus; error: string } | undefined;
+      let turnsRan = 0;
       try {
         for (let i = 0; i < job.task.steps.length; i++) {
           const step = job.task.steps[i]!;
+          const turnNum = i + 1;
           if (step.setupScriptPath) {
             const script = await readFile(step.setupScriptPath);
             await sandbox.writeFile("/tmp/.rwkv-step-setup.sh", script);
@@ -1406,51 +1545,104 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
               throw new Error(`Step ${step.name} setup.sh failed: ${(setupRes.stdout.toString() + setupRes.stderr.toString()).slice(-800)}`);
             }
           }
+
+          interrupted = undefined;
+          turnRequests = 0;
+          turnAssistant = undefined;
+          stepBudgetController = new AbortController();
+          const turnEventStart = harborEvents.length;
           const stepTimeoutMs = Math.min(step.agentTimeoutSec ?? job.task.agentTimeoutSec, options.maxAgentTimeoutSec ?? Infinity) * 1000;
           const timer = setTimeout(() => {
             interrupted = "agent_timeout";
-            budgetController.abort();
+            stepBudgetController.abort();
             void session.abort();
           }, stepTimeoutMs);
+
+          let turnStatus: HarborTrialStatus = "completed";
+          let turnError: string | undefined;
           try {
-            harborEvents.push({ type: "user", turn: i + 1, step: step.name, text: step.instruction });
+            harborEvents.push({ type: "user", turn: turnNum, step: step.name, text: step.instruction });
             await session.prompt(step.instruction);
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            const interruptKind = interrupted as "budget_exhausted" | "agent_timeout" | undefined;
+            if (interruptKind) {
+              turnStatus = interruptKind;
+              turnError = msg;
+            } else if (isInfraTransportError(msg)) {
+              status = "infra_error";
+              errorMsg = msg;
+              return;
+            } else {
+              turnStatus = "agent_error";
+              turnError = msg;
+            }
           } finally {
             clearTimeout(timer);
+            stepBudgetController.abort();
           }
-          const lastStop = finalAssistant?.stopReason;
-          if (interrupted) {
-            status = interrupted;
-            break;
-          }
-          if (lastStop !== "stop") {
-            const errDetail = finalAssistant?.errorMessage ?? `Turn ended with ${lastStop ?? "no response"}.`;
-            if (requests <= 1 && stepsCompleted === 0 && isInfraTransportError(errDetail)) {
-              status = "infra_error";
-              errorMsg = errDetail;
-              return;
+
+          if (turnStatus === "completed") {
+            const lastStop = (turnAssistant as AssistantMessage | undefined)?.stopReason;
+            const interruptKind = interrupted as "budget_exhausted" | "agent_timeout" | undefined;
+            if (interruptKind) {
+              turnStatus = interruptKind;
+              turnError = `Turn ${turnNum} interrupted (${interruptKind}).`;
+            } else if (lastStop !== "stop") {
+              const errDetail = (turnAssistant as AssistantMessage | undefined)?.errorMessage ?? `Turn ${turnNum} ended with ${lastStop ?? "no response"}.`;
+              if (isInfraTransportError(errDetail)) {
+                status = "infra_error";
+                errorMsg = errDetail;
+                return;
+              }
+              turnStatus = "agent_error";
+              turnError = errDetail;
+            } else {
+              stepsCompleted++;
             }
-            status = "agent_error";
-            errorMsg = errDetail;
-            break;
           }
-          stepsCompleted++;
+
+          turnsRan++;
+          const turnFinalText = assistantText(turnAssistant);
+          const turnEventsJsonl = serializeHarborEventLines(
+            `${job.trialId}:turn-${turnNum}`,
+            trialConfig.modelId,
+            startedAt,
+            harborEvents.slice(turnEventStart),
+            turnStatus,
+            turnRequests,
+            turnFinalText,
+          );
+          const snap = await snapshotHarborWorkspace(sandbox);
+          const wsHashesJson = JSON.stringify(snap.hashes);
+          const wsFilesJson = JSON.stringify(snap.files);
+          await writeFile(join(trialDir, `final-${turnNum}.txt`), turnFinalText, "utf8");
+          await writeFile(join(trialDir, `events-${turnNum}.jsonl`), turnEventsJsonl, "utf8");
+          await sandbox.writeFile(`/logs/agent/final-${turnNum}.txt`, turnFinalText);
+          await sandbox.writeFile(`/logs/agent/events-${turnNum}.jsonl`, turnEventsJsonl);
+          await sandbox.writeFile(`/logs/agent/ws-${turnNum}.json`, wsHashesJson);
+          await sandbox.writeFile(`/logs/agent/wsfiles-${turnNum}.json`, wsFilesJson);
+
+          if (turnStatus !== "completed") {
+            firstTurnIssue ??= { status: turnStatus, error: turnError ?? `Turn ${turnNum} ${turnStatus}` };
+            if (turnStatus === "agent_timeout") {
+              status = "agent_timeout";
+              errorMsg = turnError;
+              break;
+            }
+          }
+        }
+        if (status === "completed" && firstTurnIssue && stepsCompleted < job.task.steps.length) {
+          status = firstTurnIssue.status;
+          errorMsg = firstTurnIssue.error;
         }
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
-        if (interrupted) {
-          status = interrupted;
-          errorMsg = msg;
-        } else if (requests <= 1 && stepsCompleted === 0 && isInfraTransportError(msg)) {
-          status = "infra_error";
-          errorMsg = msg;
-          return;
-        } else {
-          status = "agent_error";
-          errorMsg = msg;
-        }
+        status = "infra_error";
+        errorMsg = msg;
+        return;
       } finally {
-        budgetController.abort();
+        stepBudgetController.abort();
         unsubscribe();
         session.dispose();
       }
@@ -1458,10 +1650,12 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
       // 2. Write Harbor agent logs (/logs/agent/final.txt & /logs/agent/events.jsonl) and run anti-leak verifier.
       const finalText = assistantText(finalAssistant);
       const eventsJsonl = serializeHarborEventLines(job.trialId, trialConfig.modelId, startedAt, harborEvents, status, requests, finalText);
+      const turnsMetaJson = JSON.stringify({ turns: job.task.steps.length, ran: turnsRan }) + "\n";
       await writeFile(join(trialDir, "final.txt"), finalText, "utf8");
       await writeFile(join(trialDir, "events.jsonl"), eventsJsonl, "utf8");
       await sandbox.writeFile("/logs/agent/final.txt", finalText);
       await sandbox.writeFile("/logs/agent/events.jsonl", eventsJsonl);
+      await sandbox.writeFile("/logs/agent/turns.json", turnsMetaJson);
 
       const stepTests = job.task.rewardStrategy === "mean"
         ? job.task.steps.filter((s) => s.testsDir)
@@ -1481,8 +1675,10 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
           verifierOutputTail = (vRes.stdout.toString() + vRes.stderr.toString()).slice(-4000);
           const rewardJsonBuf = await sandbox.downloadFile("/logs/verifier/reward.json");
           const rewardTxtBuf = await sandbox.downloadFile("/logs/verifier/reward.txt");
+          const detailsJsonBuf = await sandbox.downloadFile("/logs/verifier/details.json");
           if (rewardJsonBuf) await writeFile(join(trialDir, "reward.json"), rewardJsonBuf);
           if (rewardTxtBuf) await writeFile(join(trialDir, "reward.txt"), rewardTxtBuf);
+          if (detailsJsonBuf) await writeFile(join(trialDir, "details.json"), detailsJsonBuf);
           const parsed = parseVerifierReward(rewardJsonBuf, rewardTxtBuf);
           stepScores.push(parsed.reward);
           if (parsed.rewards) rewards = parsed.rewards;
@@ -1505,6 +1701,7 @@ export async function runHarborBenchmark(options: HarborBenchmarkOptions): Promi
         sessionId: lease.sessionId,
         model: trialConfig.modelId,
         ...(trialConfig.toolFormat === "xml" || trialConfig.toolFormat === "json" ? { promptVersion: promptVersion(trialConfig.toolFormat) } : {}),
+        editMode: effectiveEditMode,
         historyMode: effectiveHistoryMode,
         thinkingLevel,
         status,

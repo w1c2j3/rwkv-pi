@@ -50,4 +50,67 @@ test("web_search and web_fetch format DeepSeek tool responses and block private 
   await assert.rejects(() => tools[1].execute("c5", { url: "https://rwkv.com/g1", offset: 99999 }), /beyond the end/);
 
   await assert.rejects(() => tools[0].execute("c6", { query: "over budget" }), /budget reached/);
+
+  const spilledFiles = new Map();
+  const spillTools = createWebTools(
+    { RWKV_WEB_API_URL: "http://172.17.0.1:18481/v1/tools", RWKV_WEB_MAX_CALLS: "5" },
+    {
+      fetchImpl: fakeFetch,
+      onSpill: async (_url, content) => {
+        const path = "/tmp/dsh-spill-test123.txt";
+        spilledFiles.set(path, content);
+        return path;
+      },
+    },
+  );
+  const spillFirst = JSON.parse((await spillTools[1].execute("s1", { url: "https://rwkv.com/rfc" })).content[0].text);
+  assert.equal(spillFirst.spilledTo, "/tmp/dsh-spill-test123.txt");
+  assert.match(spillFirst.content, /\/tmp\/dsh-spill-test123\.txt/);
+  assert.equal(spilledFiles.get("/tmp/dsh-spill-test123.txt")?.length, 11234);
+});
+
+test("DSH retrieval mode merges multi-query searches, focuses long pages without offset traps, and blocks duplicate calls", async () => {
+  const calls = [];
+  const fakeFetch = async (url, init) => {
+    const body = JSON.parse(init.body);
+    calls.push({ url: String(url), body });
+    if (String(url).endsWith("/search")) {
+      return new Response(JSON.stringify({
+        results: [{
+          title: `Result for ${body.query}`,
+          url: `https://docs.python.org/${encodeURIComponent(body.query)}`,
+          date: "2024-10-07",
+          summary: "Python 3.13.0 final was released on October 7, 2024 with experimental free-threaded PEP 703 support.",
+        }],
+      }), { status: 200 });
+    }
+    const longDoc = "Overview header\n" + "filler paragraph\n".repeat(800) + "PEP 703 free-threaded mode arrived in Python 3.13.0 on 2024-10-07.\n" + "tail section\n".repeat(200);
+    return new Response(JSON.stringify({ title: "What's New In Python 3.13", content: longDoc }), { status: 200 });
+  };
+
+  const dshTools = createWebTools(
+    { RWKV_WEB_API_URL: "http://172.17.0.1:18481/v1/tools", RWKV_WEB_FORMAT: "dsh" },
+    {
+      fetchImpl: fakeFetch,
+      getUserQuestion: () => "对比 Python 3.12 与 3.13 发布日期及 PEP 703",
+      onSpill: async () => "/tmp/dsh-spill/page-1.txt",
+    },
+  );
+
+  const s1 = await dshTools[0].execute("d1", { queries: ["Python 3.12.0 release date", "Python 3.13.0 PEP 703"] });
+  assert.match(s1.content[0].text, /\[S1\]/);
+  assert.match(s1.content[0].text, /\[S2\]/);
+  assert.equal(calls.filter((c) => c.url.endsWith("/search")).length, 2);
+  assert.equal(calls[0].body.need_content, true);
+  assert.ok(calls[0].body.ori_question.includes("PEP 703"));
+
+  // Duplicate search in same turn returns DSH duplicate reminder instead of re-billing
+  const dupSearch = await dshTools[0].execute("d2", { query: "Python 3.12.0 release date" });
+  assert.match(dupSearch.content[0].text, /repeats a successful call/);
+
+  // Long page fetch keeps head + PEP 703 focus section + tail + spill file notice (no nextOffset loop)
+  const f1 = await dshTools[1].execute("d3", { url: "https://docs.python.org/3.13/whatsnew/3.13.html", focus: "PEP 703" });
+  assert.match(f1.content[0].text, /PEP 703 free-threaded mode arrived in Python 3.13\.0/);
+  assert.match(f1.content[0].text, /\/tmp\/dsh-spill\/page-1\.txt/);
+  assert.doesNotMatch(f1.content[0].text, /nextOffset/);
 });

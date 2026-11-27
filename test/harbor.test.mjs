@@ -125,12 +125,28 @@ test("splitReusableDockerfile deduplicates base layers across workspace-only tas
     "    && apt-get install -y python3",
     "WORKDIR /app",
     "COPY workspace/ /app/",
+    "COPY turns.json /rae/turns.json",
+    "COPY web.json /rae/web.json",
     "",
   ].join("\n");
   const split = splitReusableDockerfile(harborExportStyle);
   assert.equal(split?.copiesWorkspaceOnly, true);
   assert.ok(!split?.baseDockerfile.includes("COPY workspace/"));
+  assert.ok(!split?.baseDockerfile.includes("turns.json"));
   assert.ok(split?.baseDockerfile.includes("WORKDIR /app"));
+
+  const gitInitStyle = [
+    "FROM python:3.12-slim",
+    "RUN apt-get update && apt-get install -y --no-install-recommends git && rm -rf /var/lib/apt/lists/*",
+    "WORKDIR /app",
+    "COPY workspace/ /app/",
+    "COPY init.sh /tmp/_init.sh",
+    "RUN bash /tmp/_init.sh && rm -f /tmp/_init.sh",
+  ].join("\n");
+  const gitSplit = splitReusableDockerfile(gitInitStyle);
+  assert.equal(gitSplit?.copiesWorkspaceOnly, true);
+  assert.equal(gitSplit?.runsInitScript, true);
+  assert.ok(!gitSplit?.baseDockerfile.includes("_init.sh"));
 
   const customContext = "FROM ubuntu:24.04\nCOPY fixture.db /opt/fixture.db\nWORKDIR /app\n";
   assert.equal(splitReusableDockerfile(customContext), undefined);
@@ -173,11 +189,13 @@ async function createLocalTestSandbox(rootDir) {
     return join(containerRoot, rel);
   };
   const remapScriptPaths = (text) =>
-    text
-      .replaceAll("/logs/", `${join(containerRoot, "logs")}/`)
-      .replace(/\/tests(?=\/|\s|$)/g, join(containerRoot, "tests"))
-      .replaceAll("/tmp/.rwkv-step-setup.sh", join(containerRoot, "tmp", ".rwkv-step-setup.sh"))
-      .replaceAll("/app", appDir);
+    text.includes(containerRoot)
+      ? text
+      : text
+          .replaceAll("/logs/", `${join(containerRoot, "logs")}/`)
+          .replace(/\/tests(?=\/|\s|$)/g, join(containerRoot, "tests"))
+          .replaceAll("/tmp/.rwkv-step-setup.sh", join(containerRoot, "tmp", ".rwkv-step-setup.sh"))
+          .replaceAll("/app", appDir);
 
   const exec = (argv, opts = {}) =>
     new Promise((resolveExec, rejectExec) => {
@@ -290,7 +308,7 @@ test("runHarborBenchmark executes concurrent multi-step trials, enforces anti-le
   const tasksDir = join(tmp, "tasks");
   const outDir = join(tmp, "out");
 
-  // Task A: single-turn writing answer.txt + checking /logs/agent/final.txt & events.jsonl via reward.txt
+  // Task A: single-turn writing answer.txt + checking /logs/agent/final-1.txt, ws-1.json, wsfiles-1.json & events-1.jsonl (`"tool":"write"`)
   const taskADir = join(tasksDir, "task-a");
   await mkdir(join(taskADir, "environment"), { recursive: true });
   await mkdir(join(taskADir, "tests"), { recursive: true });
@@ -298,7 +316,7 @@ test("runHarborBenchmark executes concurrent multi-step trials, enforces anti-le
   await writeFile(join(taskADir, "instruction.md"), "Write answer.txt with 42.\n");
   await writeFile(
     join(taskADir, "tests", "test.sh"),
-    '#!/bin/sh\nif [ "$(cat answer.txt)" = "42" ] && grep -q "FINAL_ANSWER_OK" /logs/agent/final.txt && grep -q \'"type":"tool_call"\' /logs/agent/events.jsonl; then echo 1.0 > /logs/verifier/reward.txt; else echo 0.0 > /logs/verifier/reward.txt; fi\n',
+    '#!/bin/sh\nif [ "$(cat answer.txt)" = "42" ] && grep -q "FINAL_ANSWER_OK" /logs/agent/final-1.txt && grep -q \'"tool":"write"\' /logs/agent/events-1.jsonl && grep -q "answer.txt" /logs/agent/ws-1.json && grep -q "42" /logs/agent/wsfiles-1.json; then echo 1.0 > /logs/verifier/reward.txt; echo \'{"score":1.0}\' > /logs/verifier/details.json; else echo 0.0 > /logs/verifier/reward.txt; fi\n',
   );
 
   // Task B: 2-step v1.4 task with setup.sh fault injection on step 2 + reward.json
@@ -347,11 +365,11 @@ test("runHarborBenchmark executes concurrent multi-step trials, enforces anti-le
   assert.equal(summary1.totals.meanReward, 1);
   assert.ok(seenHeaders.every((h) => typeof h === "string" && h.startsWith("harbor-")));
   assert.deepEqual(seenSampling[0], {
-    temperature: 0.3,
-    top_p: 0.5,
+    temperature: 0.5,
+    top_p: 0.7,
     top_k: 65536,
-    alpha_presence: 0.5,
-    alpha_frequency: 0.1,
+    alpha_presence: 0.8,
+    alpha_frequency: 0.2,
   });
 
   // Second run with resume=true: task-a (completed) must be skipped, task-b (infra_error) must be retried and pass!
@@ -374,6 +392,9 @@ test("runHarborBenchmark executes concurrent multi-step trials, enforces anti-le
   assert.equal(summary2.totals.passAtK, 1);
   // Task A took 2 requests; resume should only execute Task B's 4 requests (2 steps x 2 requests).
   assert.equal(seenHeaders.length - requestsBeforeResume, 4);
+  assert.ok(existsSync(join(outDir, "trials", "task-a", "details.json")));
+  assert.equal(summary2.totals.totalPoints, 20);
+  assert.equal(summary2.totals.maxPoints, 20);
   assert.ok(existsSync(join(outDir, "SCOREBOARD.md")));
   assert.match(await readFile(join(outDir, "SCOREBOARD.md"), "utf8"), /100\.00%/);
 });

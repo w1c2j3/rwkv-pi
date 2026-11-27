@@ -186,7 +186,9 @@ export function buildOpenAIEpochStateLedger(
   const subagentSummaries: string[] = [];
   const webSummaries: string[] = [];
   const failed: string[] = [];
+  const recentBashByCmd = new Map<string, string>();
   let latestBash: string | undefined;
+  let latestBashCmdKey: string | undefined;
   let bashRuns = 0;
 
   for (const group of groups) {
@@ -210,6 +212,9 @@ export function buildOpenAIEpochStateLedger(
           .filter((l) => l !== "" && !/^(?:\[?exit code|Command exited with code)/i.test(l));
         const tailSummary = bodyLines.length > 0 ? ` (${cleanOneLine(bodyLines[bodyLines.length - 1]!, 80)})` : "";
         latestBash = `${cmd} -> exit ${exitCode}${tailSummary}`;
+        latestBashCmdKey = cmd;
+        recentBashByCmd.delete(cmd);
+        recentBashByCmd.set(cmd, latestBash);
         if (!callFailed) {
           const catMatches = rawCmd.matchAll(/(?:^|[;&|]\s*|\s)(?:cat|sed\s+-n\s+['"][^'"]+['"]|head(?:\s+-\d+|\s+-n\s*\d+)?|tail(?:\s+-\d+|\s+-n\s*\d+)?)\s+([^\s;&|'"]+)/g);
           for (const m of catMatches) {
@@ -296,10 +301,17 @@ export function buildOpenAIEpochStateLedger(
   if (inspected.length > 0) {
     const shown = inspected.slice(-12);
     const omitted = inspected.length - shown.length;
-    sections.push(`- Inspected: ${shown.join(", ")}${omitted > 0 ? ` (+${omitted} earlier)` : ""}`);
+    sections.push(`- Inspected (content folded; call read with offset/limit before editing): ${shown.join(", ")}${omitted > 0 ? ` (+${omitted} earlier)` : ""}`);
   }
   if (latestBash !== undefined) {
     sections.push(`- Latest command (${bashRuns} run): ${latestBash}`);
+    const earlierBash = [...recentBashByCmd.entries()]
+      .filter(([cmdKey]) => cmdKey !== latestBashCmdKey)
+      .map(([, summary]) => summary)
+      .slice(-4);
+    if (earlierBash.length > 0) {
+      sections.push(`- Earlier commands (already run, do not repeat): ${earlierBash.join("; ")}`);
+    }
   }
   if (subagentSummaries.length > 0) {
     sections.push(`- Subagents: ${subagentSummaries.slice(-6).join("; ")}`);

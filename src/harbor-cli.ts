@@ -29,6 +29,7 @@ try {
       limit: { type: "string" },
       tools: { type: "string", default: "read,write,edit,bash" },
       web: { type: "boolean", default: false },
+      "edit-mode": { type: "string" },
       "history-mode": { type: "string" },
       thinking: { type: "string", default: "high" },
       "max-requests": { type: "string", default: "48" },
@@ -54,6 +55,10 @@ try {
   } else {
     if (!values.tasks || !values.out) throw new Error("--tasks and --out are required.");
     if (values.thinking !== "high" && values.thinking !== "off") throw new Error("--thinking must be high or off.");
+    const editRaw = values["edit-mode"] ?? process.env.RWKV_EDIT_MODE ?? "line";
+    if (editRaw !== "line" && editRaw !== "text") {
+      throw new Error("--edit-mode must be line or text.");
+    }
     const historyRaw = values["history-mode"] ?? process.env.RWKV_HISTORY_MODE ?? "epoch";
     if (historyRaw !== "full" && historyRaw !== "epoch" && historyRaw !== "worklist") {
       throw new Error("--history-mode must be full, epoch, or worklist.");
@@ -88,6 +93,7 @@ try {
       limit,
       tools: parseToolList(values.tools),
       enableWebTools: values.web,
+      editMode: editRaw,
       historyMode: historyRaw,
       thinkingLevel: values.thinking,
       maxRequests,
@@ -107,6 +113,7 @@ try {
           durationSec: rec.durationSec,
           endpoint: rec.endpoint,
           progress: `${sum.totals.finished}/${sum.totals.planned}`,
+          points: `${sum.totals.totalPoints}/${sum.totals.maxPoints}`,
           meanReward: sum.totals.meanReward,
         }));
       },

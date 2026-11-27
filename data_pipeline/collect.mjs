@@ -59,7 +59,7 @@ function providerFor(qid,taskKey=qid){
   if(!mergedHeaders.has('authorization'))mergedHeaders.set('authorization','Bearer '+key);
   return budget.forArm(profile.model,profileId+'/'+taskKey+'/'+n)(u,{...i,headers:mergedHeaders});
  };
- return {...provider,stream:(m,c,o)=>provider.stream(m,c,{...o,maxRetries:0,fetch:fetcher}),streamSimple:(m,c,o)=>provider.streamSimple(m,c,{...o,maxRetries:0,fetch:fetcher})};
+ return {...provider,rwkvPiEditMode:profile.editMode??'line',stream:(m,c,o)=>provider.stream(m,c,{...o,maxRetries:0,fetch:fetcher}),streamSimple:(m,c,o)=>provider.streamSimple(m,c,{...o,maxRetries:0,fetch:fetcher})};
 }
 const queue=teacher.jobs.filter(j=>!passedIds.has(j.questionId));
 function searchCorpus(corpus,query,limit=5){
@@ -82,7 +82,7 @@ async function getDaggerStudentProvider(){
  if(daggerStudentProvider)return daggerStudentProvider;
  const student=read(ex.studentConfig);
  const {createRwkvProvider,readConfig}=await import(pathToFileURL(join(ex.runtime,'dist','provider.js')).href);
- const cfg=readConfig({...process.env,RWKV_BACKEND:student.backend??'lightning',RWKV_BASE_URL:student.baseUrl,RWKV_MODEL:student.modelId,RWKV_API_KEY:student.apiKey??'local-rwkv',RWKV_CONTEXT_WINDOW:String(student.contextWindow??32768),RWKV_MAX_TOKENS:String(student.maxTokens??6144),RWKV_TOOL_FORMAT:student.toolFormat??'xml',RWKV_PROMPT_TEMPLATE:student.promptTemplate??'xml',RWKV_TOOL_CALL_RECOVERY:'1',RWKV_IDENTICAL_CALL_LIMIT:'2',RWKV_HISTORY_MODE:student.historyMode??'epoch',RWKV_EPOCH_BUDGET_TOKENS:String(student.epochBudgetTokens??9600),RWKV_EPOCH_KEEP_RECENT_PAIRS:String(student.epochKeepRecentPairs??2),RWKV_EPOCH_MAX_RESULT_TOKENS:String(student.epochMaxResultTokens??2000),...(student.adapterId?{RWKV_ADAPTER_ID:String(student.adapterId)}:{}),...(student.adapterVersion?{RWKV_ADAPTER_VERSION:String(student.adapterVersion)}:{}),...(student.adapterScale!==undefined?{RWKV_ADAPTER_SCALE:String(student.adapterScale)}:{})});
+ const cfg=readConfig({...process.env,RWKV_BACKEND:student.backend??'lightning',RWKV_BASE_URL:student.baseUrl,RWKV_MODEL:student.modelId,RWKV_API_KEY:student.apiKey??'local-rwkv',RWKV_CONTEXT_WINDOW:String(student.contextWindow??32768),RWKV_MAX_TOKENS:String(student.maxTokens??6144),RWKV_TOOL_FORMAT:student.toolFormat??'xml',RWKV_PROMPT_TEMPLATE:student.promptTemplate??'xml',RWKV_TOOL_CALL_RECOVERY:'1',RWKV_IDENTICAL_CALL_LIMIT:'2',RWKV_EDIT_MODE:student.editMode??profile.editMode??'line',RWKV_HISTORY_MODE:student.historyMode??'epoch',RWKV_EPOCH_BUDGET_TOKENS:String(student.epochBudgetTokens??9600),RWKV_EPOCH_KEEP_RECENT_PAIRS:String(student.epochKeepRecentPairs??2),RWKV_EPOCH_MAX_RESULT_TOKENS:String(student.epochMaxResultTokens??2000),...(student.adapterId?{RWKV_ADAPTER_ID:String(student.adapterId)}:{}),...(student.adapterVersion?{RWKV_ADAPTER_VERSION:String(student.adapterVersion)}:{}),...(student.adapterScale!==undefined?{RWKV_ADAPTER_SCALE:String(student.adapterScale)}:{})});
  daggerStudentProvider=createRwkvProvider(cfg);return daggerStudentProvider;
 }
 async function one(job){
@@ -95,15 +95,24 @@ async function one(job){
  const begin=Date.now();let row;
  for(let attempt=1;attempt<=maxAttempts&&!budget.state.halted;attempt++){
   const taskKey=attempt===1?q.id:`${q.id}@${attempt}`;
-  const makeWebTools=(phase='teacher')=>createProductionWebTools({maxCalls:profile.webTools?.maxCalls??32,callWeb:async(kind,body,idx,signal)=>{
-   if(!corpus)return budget.callWebTool(kind,body,{taskId:`${profileId}/${taskKey}/${phase}-web-${String(idx).padStart(3,'0')}`,apiKey:webKey,baseUrl:profile.webTools?.baseUrl,signal});
-   if(kind==='search')return searchCorpus(corpus,body.query,body.count??5);
-   const hit=corpus.find(p=>p.url===body.url)||corpus.find(p=>p.url.replace(/\/+$/,'')===String(body.url??'').replace(/\/+$/,''));
-   if(!hit)throw Error(`HTTP 404 Not Found: ${body.url}`);
-   return {title:hit.title,content:hit.content};
-  }});
-  const webTools=wantsWeb?makeWebTools('teacher'):undefined;
-  const options={provider:providerFor(q.id,taskKey),role:'teacher',outputDir:join(target,'runs'),followups:bundle.followups??[],maxRequests:ex.maxRequests??96,timeoutMs:ex.timeoutMs??1800000,sandbox:'bubblewrap',thinkingLevel:profile.thinking,appendSystemPrompt:profile.appendSystemPrompt,promptSuffix:profile.promptSuffix??'',...(webTools?{webTools}:{}),...(profile.historyMode?{historyMode:profile.historyMode,epoch:{...(profile.epochBudgetTokens?{budgetTokens:profile.epochBudgetTokens}:{}),...(profile.epochKeepRecentPairs?{keepRecentPairs:profile.epochKeepRecentPairs}:{}),...(profile.epochMaxResultTokens?{maxResultTokens:profile.epochMaxResultTokens}:{})}}:{})};
+  const directSpillDir=wantsWeb?join(target,'runs',`spill-${taskKey}-${randomUUID().slice(0,8)}`):undefined;
+  const makeWebTools=(phase='teacher',ctx={})=>{
+   const spillHostDir=ctx.spillHostDir??directSpillDir;
+   return createProductionWebTools({maxCalls:profile.webTools?.maxCalls??32,onSpill:spillHostDir?(url,content)=>{
+    mkdirSync(spillHostDir,{recursive:true,mode:0o700});
+    const name=`dsh-spill-${createHash('sha256').update(url).digest('hex').slice(0,12)}.txt`;
+    writeFileSync(join(spillHostDir,name),content,{mode:0o600});
+    return `/tmp/dsh-spill/${name}`;
+   }:undefined,callWeb:async(kind,body,idx,signal)=>{
+    if(!corpus)return budget.callWebTool(kind,body,{taskId:`${profileId}/${taskKey}/${phase}-web-${String(idx).padStart(3,'0')}`,apiKey:webKey,baseUrl:profile.webTools?.baseUrl,signal});
+    if(kind==='search')return searchCorpus(corpus,body.query,body.count??5);
+    const hit=corpus.find(p=>p.url===body.url)||corpus.find(p=>p.url.replace(/\/+$/,'')===String(body.url??'').replace(/\/+$/,''));
+    if(!hit)throw Error(`HTTP 404 Not Found: ${body.url}`);
+    return {title:hit.title,content:hit.content};
+   }});
+  };
+  const webTools=wantsWeb?makeWebTools('teacher',{spillHostDir:directSpillDir}):undefined;
+  const options={provider:providerFor(q.id,taskKey),role:'teacher',outputDir:join(target,'runs'),...(directSpillDir?{spillHostDir:directSpillDir}:{}),followups:bundle.followups??[],maxRequests:ex.maxRequests??96,timeoutMs:ex.timeoutMs??1800000,sandbox:'bubblewrap',thinkingLevel:profile.thinking,editMode:profile.editMode??'line',appendSystemPrompt:profile.appendSystemPrompt,promptSuffix:profile.promptSuffix??'',...(webTools?{webTools}:{}),...(profile.historyMode?{historyMode:profile.historyMode,epoch:{...(profile.epochBudgetTokens?{budgetTokens:profile.epochBudgetTokens}:{}),...(profile.epochKeepRecentPairs?{keepRecentPairs:profile.epochKeepRecentPairs}:{}),...(profile.epochMaxResultTokens?{maxResultTokens:profile.epochMaxResultTokens}:{})}}:{})};
   try{
    let result;
    if(bundle.task.domain==='agent-orchestration'){

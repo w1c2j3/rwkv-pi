@@ -31,7 +31,7 @@ function appendSystemGuide(msg, suffix) {
 const TEACHER_WIRE_GUIDE =
   '【内部纠错示范约束（仅指导生成，不进入训练提示词）】：当前对话中的前序步骤来自待纠错模型的真实踩坑现场，工作区可能已存在部分改动、错误补丁、未匹配的 edit 或未通过的测试。' +
   '请你严格以【同一个助手的第一人称视角】从当前最新观察无缝接续——严禁在 <think> 思考或最终回复中出现“前任”、“上一个助手”、“学生模型”、“接管”等任何元描述，必须自然表现为你自己发现刚才的操作报错或未满足要求并立即排障修正！' +
-  '当前采用 9.6K 滚动短上下文（单步结果上限 2000 tokens，仅保留最近 2 步完整输出，更早步骤折叠为 State Ledger）：请采取【定位 -> 用 read 精读 1 个目标文件 -> 立即用 edit/write 修正 -> 运行测试验证】的增量步进策略，切勿用 bash 一次性 cat 多个文件。全部要求验证通过后用简体中文简洁总结。';
+  '当前采用 9.6K 滚动短上下文（单步结果上限 2000 tokens，仅保留最近 2 步完整输出，更早步骤折叠为 State Ledger）：请采取【定位 -> 用 read 精读 1 个目标文件（每次 <=150 行，确认当前 1-based 行号与首行内容） -> 立即用 edit({"path":...,"edits":[{"start_line":...,"end_line":...,"start_text":...,"new_text":...}]}) 原子批量修改或 write 修正 -> 运行测试验证】的增量步进策略，修改同一文件多处时尽量合并进单次 edits[] 调用，严禁未读盲改或用 bash 一次性 cat 多个文件。全部要求验证通过后用简体中文简洁总结。';
 
 export function isStudentInfrastructureError(record) {
   const err = String(record?.error ?? '').toLowerCase();
@@ -136,13 +136,18 @@ export async function runDaggerTask(input, options) {
     distHarness,
     {parseToolList},
     {hostFs, TOLERANT_TOOL_NAMES, withTolerance},
+    {createLineModeTools, LineViewTracker},
     {foldEpochRequest},
     {foldWorklistRequest},
-  ] = await Promise.all(['tasks', 'provenance', 'sandbox', 'harness', 'tools', 'tolerant-tools', 'epoch', 'worklist'].map(load));
+  ] = await Promise.all(['tasks', 'provenance', 'sandbox', 'harness', 'tools', 'tolerant-tools', 'line-edit', 'epoch', 'worklist'].map(load));
   const {withAnswerEvidence} = existsSync(answerEvidencePath)
     ? await import(pathToFileURL(answerEvidencePath).href)
     : {withAnswerEvidence: async (_t, _c, _r, fn) => fn()};
-  const applyTolerance = (tools, dir, fsImpl) => tools.map(t => (TOLERANT_TOOL_NAMES.includes(t.name) ? withTolerance(t, dir, fsImpl) : t));
+  const effectiveEditMode = options.editMode ?? options.provider.rwkvPiEditMode ?? 'line';
+  const lineTracker = effectiveEditMode === 'line' ? new LineViewTracker() : undefined;
+  const wrapWorkspaceTools = (tools, dir, fsImpl) => effectiveEditMode === 'line'
+    ? createLineModeTools(tools, dir, fsImpl, {tolerance: true, tracker: lineTracker})
+    : tools.map(t => (TOLERANT_TOOL_NAMES.includes(t.name) ? withTolerance(t, dir, fsImpl) : t));
 
   const task = parseTask(input);
   const {runTask} = task.answerEvidence && (options.sandbox ?? 'bubblewrap') !== 'none' && existsSync(teacherHarnessPath)
@@ -159,7 +164,9 @@ export async function runDaggerTask(input, options) {
   const immutableList = options.immutableFiles ?? [];
 
   // --- Phase 1: RWKV Student Rollout ---
-  const studentWebTools = options.createWebTools ? options.createWebTools('student') : undefined;
+  const useSandbox = (options.sandbox ?? 'bubblewrap') === 'bubblewrap';
+  const studentSpillDir = useSandbox ? join(resolve(options.outputDir), 'student-spill') : undefined;
+  const studentWebTools = options.createWebTools ? options.createWebTools('student', {spillHostDir: studentSpillDir}) : undefined;
   let studentResult;
   if (options.acquireStudentSlot) await options.acquireStudentSlot();
   try {
@@ -171,7 +178,9 @@ export async function runDaggerTask(input, options) {
       maxRequests: options.studentMaxRequests ?? 20,
       timeoutMs: options.studentTimeoutMs ?? 480000,
       sandbox: options.sandbox ?? 'bubblewrap',
+      ...(studentSpillDir ? {spillHostDir: studentSpillDir} : {}),
       thinkingLevel: 'high',
+      editMode: effectiveEditMode,
       historyMode: effectiveHistoryMode,
       epoch: effectiveEpochConfig,
       ...(studentWebTools ? {webTools: studentWebTools} : {}),
@@ -231,12 +240,15 @@ export async function runDaggerTask(input, options) {
     immutableList.filter(rel => existsSync(taskPath(cwd, rel))).map(rel => [rel, sha(readFileSync(taskPath(cwd, rel)))]),
   );
 
-  const useSandbox = (options.sandbox ?? 'bubblewrap') === 'bubblewrap';
   const piTools = task.tools.filter(t => t !== 'web_search' && t !== 'web_fetch');
+  const teacherSpillDir = useSandbox ? join(dir, 'spill') : undefined;
+  if (studentSpillDir && teacherSpillDir && existsSync(studentSpillDir)) {
+    cpSync(studentSpillDir, teacherSpillDir, {recursive: true, verbatimSymlinks: true});
+  }
   let sandbox;
   let agentCwd = cwd;
   if (useSandbox) {
-    sandbox = new WorkspaceSandbox(cwd);
+    sandbox = new WorkspaceSandbox(cwd, undefined, undefined, teacherSpillDir);
     await sandbox.probe();
     await sandbox.probeSearch(piTools);
     agentCwd = sandbox.cwd;
@@ -256,6 +268,7 @@ export async function runDaggerTask(input, options) {
     isolation: sandbox?.kind ?? 'none',
     workspacePath: agentCwd,
     responseAdapter: 'none',
+    editMode: effectiveEditMode,
     historyMode: effectiveHistoryMode,
     startedAt: new Date().toISOString(),
     finishedAt: '',
@@ -281,7 +294,7 @@ export async function runDaggerTask(input, options) {
   const logEvent = e => appendFileSync(join(dir, 'events.jsonl'), JSON.stringify(e) + '\n', {mode: 0o600});
   checkpoint();
 
-  const extraWebTools = options.createWebTools ? options.createWebTools('teacher') : (options.webTools ?? []);
+  const extraWebTools = options.createWebTools ? options.createWebTools('teacher', {spillHostDir: teacherSpillDir}) : (options.webTools ?? []);
   const settingsManager = SettingsManager.inMemory({
     compaction: {enabled: false},
     retry: {enabled: false, provider: {maxRetries: 0}},
@@ -314,7 +327,7 @@ export async function runDaggerTask(input, options) {
 
   let rawTools;
   if (sandbox) {
-    rawTools = applyTolerance(sandbox.tools(piTools), agentCwd, sandbox.fs);
+    rawTools = wrapWorkspaceTools(sandbox.tools(piTools), agentCwd, sandbox.fs);
   } else {
     const {
       createBashToolDefinition, createEditToolDefinition, createFindToolDefinition,
@@ -323,9 +336,16 @@ export async function runDaggerTask(input, options) {
     const factories = {
       read: createReadToolDefinition, write: createWriteToolDefinition, edit: createEditToolDefinition,
       bash: d => createBashToolDefinition(d, {exposeSessionEnvironment: false}),
-      grep: createGrepToolDefinition, find: createFindToolDefinition, ls: createLsToolDefinition,
+      grep: createFindToolDefinition && createGrepToolDefinition, find: createFindToolDefinition, ls: createLsToolDefinition,
     };
-    rawTools = applyTolerance(piTools.map(n => factories[n](cwd)), cwd, hostFs);
+    rawTools = wrapWorkspaceTools(piTools.map(n => factories[n](cwd)), cwd, hostFs);
+  }
+  if (lineTracker) {
+    const readText = async absPath => {
+      if (sandbox) return (await sandbox.fs.readFile(absPath)).toString('utf8');
+      return (await hostFs.readFile(absPath)).toString('utf8');
+    };
+    await lineTracker.seedFromMessages(messages, agentCwd, readText);
   }
   const orderedPiTools = piTools.length ? parseToolList(piTools) : [];
   const sessionToolNames = [...orderedPiTools, ...extraWebTools.map(t => t.name)];
@@ -366,6 +386,9 @@ export async function runDaggerTask(input, options) {
     if (!options.provider.rwkvPiTransportFolded) {
       if (effectiveHistoryMode === 'epoch') cleanReq = foldEpochRequest(cleanReq, effectiveEpochConfig).request;
       else if (effectiveHistoryMode === 'worklist') cleanReq = foldWorklistRequest(cleanReq).request;
+    }
+    if (Array.isArray(cleanReq.messages)) {
+      lineTracker?.syncWithActiveMessages(cleanReq.messages);
     }
     cleanReq = structuredClone({...cleanReq, tools: cleanReq.tools ?? []});
     record.steps.push({request: cleanReq, supervised: true, actor: 'teacher'});

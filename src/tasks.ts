@@ -21,6 +21,8 @@ export interface Task {
   checks: Check[];
   /** Optional pinned container environment; see environment.ts. */
   environment?: TaskEnvironment;
+  /** When true, acceptance checks read `.task-evidence/final.json` (`finalAnswer`, `toolCalls`). */
+  answerEvidence?: boolean;
 }
 
 export function object(value: unknown): value is Record<string, unknown> {

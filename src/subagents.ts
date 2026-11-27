@@ -57,7 +57,7 @@ export interface Subagent {
   state: SubagentState; dir: string; createdAt: number; startedAt?: number; finishedAt?: number;
   requests: number; toolCalls: number; toolErrors: number; lastTool?: string; answer?: string;
   stopReason?: string; error?: string; exitCode?: number | null; changes?: FileChange[]; applied?: boolean;
-  work: WorkCounters; appliedFiles?: string[];
+  work: WorkCounters; appliedFiles?: string[]; addedLines?: number; removedLines?: number;
 }
 
 // Version-control internals and interpreter caches are never reported or applied as changes.
@@ -98,11 +98,12 @@ function piCommand(task: string): { command: string; args: string[]; source?: st
   const piCli = source ? join(source, "packages/coding-agent/src/cli.ts") : join(dirname(piEntry), "bundle", "cli.js");
   const preload = source ? ["--import", pathToFileURL(join(source, "packages/coding-agent/src/experimental/source-resolver.ts")).href] : [];
   const extension = fileURLToPath(new URL("./extension.js", import.meta.url));
+  const webTools = process.env.RWKV_WEB_API_KEY?.trim() ? ["web_search", "web_fetch"] : [];
   return {
     command: process.execPath,
     ...(source ? { source } : {}),
     args: [...preload, piCli, "--no-extensions", "--extension", extension, "--provider", "rwkv", "--model", config.modelId, "--thinking", "high",
-      "--tools", SUBAGENT_TOOLS.join(","), "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-mcp",
+      "--tools", [...SUBAGENT_TOOLS, ...webTools].join(","), "--no-skills", "--no-context-files", "--no-prompt-templates", "--no-mcp",
       "--mode", "json", "-p", "--no-session", task],
   };
 }
@@ -204,8 +205,19 @@ export class SubagentManager {
       }
     }
     const { command, args, source } = piCommand(task);
-    const env: NodeJS.ProcessEnv = { ...process.env, PI_CODING_AGENT_DIR: agentDir, ...(source ? { RWKV_PI_SOURCE: source } : {}) };
-    for (const key of Object.keys(env)) if (key.startsWith("TEACHER_") || key.startsWith("DEEPSEEK_") || key.startsWith("STEP_")) delete env[key];
+    // Child subagent is already isolated inside SubagentManager's bwrap; disable nested bwrap and /rwkv-subagent recursion,
+    // and assign each concurrent child its own sticky X-RWKV-Session-Id prefix-cache slot.
+    const env: NodeJS.ProcessEnv = {
+      ...process.env,
+      RWKV_SANDBOX: "none",
+      RWKV_IS_CHILD_SUBAGENT: "1",
+      RWKV_SESSION_ID: `${this.session}-${agent.id}`,
+      PI_CODING_AGENT_DIR: agentDir,
+      ...(source ? { RWKV_PI_SOURCE: source } : {}),
+    };
+    for (const key of Object.keys(env)) {
+      if (key.startsWith("TEACHER_") || key.startsWith("DEEPSEEK_") || key.startsWith("STEP_") || key === "RWKV_SUBAGENT_AUTO") delete env[key];
+    }
     // A read-only host mount still permits reading files: mask the paid main-agent key as well.
     const mainKey = process.env.TEACHER_API_KEY_FILE;
     const hiddenKeys = mainKey && existsSync(mainKey) ? ["--ro-bind", "/dev/null", resolve(mainKey)] : [];
@@ -284,7 +296,17 @@ export class SubagentManager {
     agent.state = state; agent.finishedAt = Date.now();
     if (error) agent.error = error;
     if (agent.write) {
-      try { agent.changes = this.diffList(agent); } catch (e) { agent.error = (agent.error ? agent.error + "; " : "") + `change scan failed: ${e}`; }
+      try {
+        agent.changes = this.diffList(agent);
+        const fullDiff = this.diff(agent.id, 500_000);
+        let added = 0, removed = 0;
+        for (const line of fullDiff.split("\n")) {
+          if (line.startsWith("+") && !line.startsWith("+++")) added++;
+          else if (line.startsWith("-") && !line.startsWith("---")) removed++;
+        }
+        agent.addedLines = added;
+        agent.removedLines = removed;
+      } catch (e) { agent.error = (agent.error ? agent.error + "; " : "") + `change scan failed: ${e}`; }
     }
     writeFileSync(join(agent.dir, "result.json"), JSON.stringify(agent, null, 2) + "\n");
     this.changed(agent);

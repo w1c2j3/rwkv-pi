@@ -8,6 +8,7 @@ import { readConfig } from "./config.js";
 import { DEFAULT_PI_TOOLS, parseToolList } from "./tools.js";
 import { WEB_TOOL_NAMES } from "./tasks.js";
 import { WORKLIST_TOOL_NAMES } from "./worklist.js";
+import { SUBAGENT_CMD_TOOLS } from "./rwkv-subagent-command.js";
 import { readTeacherConfig } from "./teacher.js";
 import { stallLimits } from "./stall-detector.js";
 import { collaborationDataRoot } from "./collab-trace.js";
@@ -62,12 +63,18 @@ if ((ACCOUNT_COMMANDS as readonly string[]).includes(command ?? "")) {
   const selectedWeb = WEB_TOOL_NAMES.filter((name) => rawTools.includes(name));
   const builtinRaw = rawTools.filter((name) => !(WEB_TOOL_NAMES as readonly string[]).includes(name));
   const worklistTools = config.historyMode === "worklist" ? [...WORKLIST_TOOL_NAMES] : [];
-  const tools = userTools ? [] : ["--tools", [...parseToolList(builtinRaw), ...selectedWeb, ...worklistTools, ...subagentTools].join(",")];
+  const slashSubagentTools = !subagents && process.env.RWKV_IS_CHILD_SUBAGENT !== "1" ? [...SUBAGENT_CMD_TOOLS] : [];
+  const tools = userTools ? [] : ["--tools", [...parseToolList(builtinRaw), ...selectedWeb, ...worklistTools, ...subagentTools, ...slashSubagentTools].join(",")];
   // Training parity: the harness renders no skills, context files, prompt templates or MCP declarations.
   // RWKV_PI_PARITY=0 restores pi's discovery for exploratory use (the model never saw those prompts).
   const parity = process.env.RWKV_PI_PARITY?.trim() !== "0";
   const parityArgs = parity ? ["--no-skills", "--no-context-files", "--no-prompt-templates", "--no-mcp"] : [];
-  const childEnv = source ? { ...process.env, RWKV_PI_SOURCE: source } : process.env;
+  const sessionId = process.env.RWKV_SESSION_ID?.trim() || `pi-${process.pid}-${Date.now().toString(36)}`;
+  const childEnv = {
+    ...process.env,
+    RWKV_SESSION_ID: sessionId,
+    ...(source ? { RWKV_PI_SOURCE: source } : {}),
+  };
   const child = spawn(process.execPath, [
     ...preload,
     piCli,

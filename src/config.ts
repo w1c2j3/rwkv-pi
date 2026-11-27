@@ -29,7 +29,9 @@ export interface RwkvConfig {
   targetFailureLimit: number;
   /** Recall-tolerant read/edit/write/ls execution (src/tolerant-tools.ts); prompts are unchanged. */
   toolTolerance: boolean;
-  /** full (default): complete conversation history; epoch: zero-tool-intrusion deterministic State Ledger folding at 9.6k; worklist: Stateful Work List folding (`todo_plan` + `todo_update`). */
+  /** line (default, Anchored Batch Line-Edit v2): 1-based numbered `read` (<=150 lines) + atomic anchored `edit(path, edits:[{start_line, end_line, start_text, new_text}])`; text: substring `edit(path, edits:[{oldText, newText}])`. */
+  editMode: "line" | "text";
+  /** epoch (default): zero-tool-intrusion deterministic State Ledger folding at 9.6k; full: complete conversation history; worklist: Stateful Work List folding (`todo_plan` + `todo_update`). */
   historyMode: "full" | "epoch" | "worklist";
   epochBudgetTokens: number;
   epochKeepRecentPairs: number;
@@ -40,6 +42,8 @@ export interface RwkvConfig {
   sampling?: RwkvSamplingConfig;
   /** Sticky session affinity header (`X-RWKV-Session-Id`) for RWKV_Lightning_CUDA_router prefix caching. */
   sessionId?: string;
+  /** Count prompt and completion tokens locally via the pinned in-memory Lightning byte-trie (`RWKV_LOCAL_TOKENIZER`, default true) to avoid 2 remote `/v1/tokens/count` RTTs per step. */
+  localTokenizer?: boolean;
   adapterId?: string;
   adapterVersion?: string;
   adapterScale?: number;
@@ -137,7 +141,9 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
   if (targetFailureLimit === 1) throw new Error("RWKV_TARGET_FAILURE_LIMIT must be 0 (disabled) or an integer >= 2.");
   const toleranceRaw = env.RWKV_TOOL_TOLERANCE?.trim() || "1";
   if (!["0", "1"].includes(toleranceRaw)) throw new Error("RWKV_TOOL_TOLERANCE must be 0 or 1.");
-  const historyMode = env.RWKV_HISTORY_MODE?.trim() || "full";
+  const editMode = env.RWKV_EDIT_MODE?.trim() || "line";
+  if (!["line", "text"].includes(editMode)) throw new Error("RWKV_EDIT_MODE must be line or text.");
+  const historyMode = env.RWKV_HISTORY_MODE?.trim() || "epoch";
   if (!["full", "epoch", "worklist"].includes(historyMode)) throw new Error("RWKV_HISTORY_MODE must be full, epoch, or worklist.");
   const epochBudgetTokens = positiveInteger("RWKV_EPOCH_BUDGET_TOKENS", 9600);
   const epochKeepRecentPairs = envInteger(env, "RWKV_EPOCH_KEEP_RECENT_PAIRS", 2, 1);
@@ -151,6 +157,8 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
   const sampling = readSamplingConfig(env);
   const sessionId = env.RWKV_SESSION_ID?.trim() || undefined;
   if (sessionId && /[\r\n\0]/.test(sessionId)) throw new Error("RWKV_SESSION_ID must not contain control characters.");
+  const localTokRaw = env.RWKV_LOCAL_TOKENIZER?.trim() || "1";
+  if (!["0", "1"].includes(localTokRaw)) throw new Error("RWKV_LOCAL_TOKENIZER must be 0 or 1.");
   const adapterId = env.RWKV_ADAPTER_ID?.trim() || undefined;
   const adapterVersion = env.RWKV_ADAPTER_VERSION?.trim() || undefined;
   const adapterScale = env.RWKV_ADAPTER_SCALE?.trim() ? Number(env.RWKV_ADAPTER_SCALE) : undefined;
@@ -169,6 +177,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
     identicalCallLimit,
     targetFailureLimit,
     toolTolerance: toleranceRaw === "1",
+    editMode: editMode as RwkvConfig["editMode"],
     historyMode: historyMode as RwkvConfig["historyMode"],
     epochBudgetTokens,
     epochKeepRecentPairs,
@@ -178,6 +187,7 @@ export function readConfig(env: NodeJS.ProcessEnv = process.env): RwkvConfig {
     worklistFoldTriggerTokens,
     ...(sampling ? { sampling } : {}),
     ...(sessionId ? { sessionId } : {}),
+    localTokenizer: localTokRaw === "1",
     ...(adapterId ? { adapterId } : {}),
     ...(adapterVersion ? { adapterVersion } : {}),
     ...(adapterScale !== undefined ? { adapterScale } : {}),

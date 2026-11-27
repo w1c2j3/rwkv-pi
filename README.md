@@ -30,6 +30,8 @@ are byte-identical.
 
 ## Quick start
 
+> **中文完整本地部署指南（权重下载 / W8A16 量化 / `rwkv_lightning_cuda` 启动 / 端到端测试）**：见 [docs/LOCAL_DEPLOYMENT.zh-CN.md](docs/LOCAL_DEPLOYMENT.zh-CN.md)。
+
 ```bash
 npm run setup                    # = scripts/install.sh: npm ci, patched Pi source, pinned Lightning tokenizer, .env, offline doctor
 $EDITOR .env                     # point RWKV_BASE_URL / RWKV_MODEL at your rwkv_lightning_cuda engine

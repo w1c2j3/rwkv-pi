@@ -9,6 +9,7 @@
     "rwkv-pi-harbor": "dist/harbor-cli.js",
     "rwkv-pi-orchestrate": "dist/orchestrate-cli.js",
     "rwkv-pi-step": "dist/step-cli.js",
+    "rwkv-pi-rl": "dist/online-rl-cli.js",
     "rwkv-pi-doctor": "dist/doctor.js"
   },
   "exports": {
@@ -42,6 +43,8 @@
     "harbor": "node scripts/run-pi-source.mjs dist/harbor-cli.js",
     "collab": "node scripts/run-pi-source.mjs dist/collaboration-cli.js",
     "dataset": "node dist/dataset-cli.js",
+    "anneal-convert": "node dist/anneal-cli.js",
+    "online-rl": "node scripts/run-pi-source.mjs dist/online-rl-cli.js",
     "tokenize": "node pipeline/compile-lightning-dataset.mjs",
     "smoke": "node scripts/smoke-harness.mjs",
     "smoke:source": "node scripts/run-pi-source.mjs scripts/smoke-harness.mjs",

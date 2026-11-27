@@ -2,11 +2,14 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import { once } from "node:events";
 import { createServer } from "node:http";
+import { existsSync } from "node:fs";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createModels } from "@earendil-works/pi-ai";
 import { createRwkvProvider, readConfig } from "../dist/provider.js";
+import { countTokensLocal } from "../dist/local-tokenizer.js";
+import { nativeTokenize, nativeTokenizerPaths } from "../dist/doctor.js";
 import { ContinuationParser, parseCalls, parseJsonCalls } from "../dist/xml.js";
 import { renderPrompt, PROMPT_VERSION, JSON_PROMPT_VERSION } from "../dist/prompt.js";
 import { runTask } from "../dist/harness.js";
@@ -111,7 +114,7 @@ test("real pi harness executes client-parsed XML and replays observations in raw
 test("native pi JSON executes through the real harness and matches canonical replay",async t=>{
   const {config,requests}=await endpoint(t,[{text:nativeJson+'\n\nUser:',matchedStop:'\nUser:'},{text:'Read successfully.<EOD>',matchedStop:'<EOD>'}]);
   const outputDir=await mkdtemp(join(tmpdir(),'native-json-test-'));t.after(()=>rm(outputDir,{recursive:true,force:true}));
-  const jsonConfig={...config,toolFormat:'json',promptTemplate:'json'};
+  const jsonConfig={...config,toolFormat:'json',promptTemplate:'json',editMode:'text'};
   const {record}=await runTask({schemaVersion:1,id:'json-fixture',family:'json-fixture',split:'smoke',source:'mock protocol test; not model evaluation',prompt:'Read input.txt.',tools:['read'],files:{'input.txt':'NATIVE_JSON_OBSERVATION\n'},checks:[{type:'file_equals',path:'input.txt',expected:'NATIVE_JSON_OBSERVATION\n'}]},
     {provider:createRwkvProvider(jsonConfig),role:'smoke',outputDir,maxRequests:2,timeoutMs:15000,sandbox:'bubblewrap',thinkingLevel:'off'});
   assert.equal(record.status,'passed',record.error);
@@ -227,11 +230,11 @@ test("stabilized tool-use sampling defaults, env overrides, and X-RWKV-Session-I
   await models.completeSimple(baseProvider.getModels()[0], { messages: userMsg }, { reasoning: "off" });
 
   // 1. Stabilized tool-use profile
-  assert.equal(requests[0].temperature, 0.3);
-  assert.equal(requests[0].top_p, 0.5);
+  assert.equal(requests[0].temperature, 0.5);
+  assert.equal(requests[0].top_p, 0.7);
   assert.equal(requests[0].top_k, 65536);
-  assert.equal(requests[0].alpha_presence, 0.5);
-  assert.equal(requests[0].alpha_frequency, 0.1);
+  assert.equal(requests[0].alpha_presence, 0.8);
+  assert.equal(requests[0].alpha_frequency, 0.2);
   assert.equal(requests[0].alpha_decay, 0.996);
   assert.equal(requests[0].session_id, undefined);
   assert.equal(headers[0]["x-rwkv-session-id"], "sticky-gpu-0");
@@ -277,4 +280,43 @@ test("stabilized tool-use sampling defaults, env overrides, and X-RWKV-Session-I
   assert.equal(requests[4].temperature, 1);
   assert.equal(requests[4].top_k, 1);
   assert.equal(requests[4].top_p, 1);
+});
+
+test("in-memory local Lightning tokenizer matches C++ tokenize-native byte-for-byte and eliminates /v1/tokens/count RTTs", async t => {
+  if (!existsSync(nativeTokenizerPaths().binary)) { t.skip("native tokenizer not built; run npm run lightning:setup && npm run lightning:tokenizer"); return; }
+  const samples = [
+    "System: doctor probe\n\nUser: 你好，RWKV 😀 <tool_call>{\"name\":\"read\"}</tool_call>\n\nAssistant: <think",
+    "Hello, world!\n\t\"escaped\" \\ backslash 'single' <EOD> trailing",
+    "def fib(n: int) -> int:\n    return n if n < 2 else fib(n - 1) + fib(n - 2)\n# 中文注释 🚀🎉🔥\n",
+    "\x00\x01\x7f\r\n" + xml + "\n\nUser: <tool_response>\n1: line one\n</tool_response>\n\nAssistant: <think></think>\n",
+  ];
+  for (const sample of samples) {
+    assert.equal(countTokensLocal(sample), nativeTokenize(sample).length, `mismatch on: ${JSON.stringify(sample.slice(0, 40))}`);
+  }
+
+  let remoteCountHits = 0;
+  const server = createServer(async (req, res) => {
+    for await (const _ of req) { /* drain */ }
+    if (req.url === "/v1/tokens/count") {
+      remoteCountHits++;
+      res.setHeader("content-type", "application/json");
+      res.end('{"tokens":100}');
+      return;
+    }
+    res.writeHead(200, { "content-type": "text/event-stream" });
+    res.write(`data: ${JSON.stringify({ id: "fast-1", object: "chat.completion.chunk", choices: [{ index: 0, delta: { content: ">ok</think>Done.<EOD>" }, finish_reason: null }] })}\n\n`);
+    res.write(`data: ${JSON.stringify({ id: "fast-1", object: "chat.completion.chunk", choices: [{ index: 0, delta: {}, finish_reason: "stop", matched_stop: "<EOD>" }] })}\n\n`);
+    res.end("data: [DONE]\n\n");
+  });
+  server.listen(0, "127.0.0.1");
+  await once(server, "listening");
+  t.after(() => new Promise(resolve => { server.close(resolve); server.closeAllConnections(); }));
+
+  const cfg = readConfig({ RWKV_BASE_URL: `http://127.0.0.1:${server.address().port}/v1` });
+  const models = createModels(), provider = createRwkvProvider(cfg);
+  models.setProvider(provider);
+  const res = await models.completeSimple(provider.getModels()[0], { messages: [{ role: "user", content: "测试免往返本地分词", timestamp: 1 }] }, { reasoning: "high" });
+  assert.equal(res.stopReason, "stop");
+  assert.equal(remoteCountHits, 0, "expected zero remote /v1/tokens/count HTTP requests when local tokenizer is active");
+  assert.ok(res.usage.input > 0 && res.usage.output > 0);
 });
