@@ -164,13 +164,13 @@ rwkv-engine set-deepseek <你的 DeepSeek API Key>
 
 Demo 位于安装目录下的 `demos/`，完整题目见 `demos/PROMPTS.zh-CN.md`。测完后执行 `rwkv-demos reset` 即可恢复原样，可以反复体验。
 
-下表中的「本地实测」是 `v0.2` W8A16 只用本地模型、不开子 Agent 时，每个 Demo 跑 3 次的通过次数：
+下表中的「本地实测」是 `v0.2` W8A16 只用本地模型、不开子 Agent 时的通过次数（通过次数 / 运行次数）：
 
 | 目录 | 场景 | 本地实测 | 是否需要 DeepSeek Key |
 | :--- | :--- | :---: | :---: |
-| `06-textindex` | 倒排索引 `search()` 回归修复（30 项测试） | **3/3**，约 20 秒 | 否 |
+| `06-textindex` | 倒排索引 `search()` 回归修复（30 项测试） | **4/5**，成功时约 20 秒 | 否 |
 | `01-portal-security` | 两轮安全审计：先只读定位漏洞，再修复并跑通测试 | 2/3（第 2 轮修复） | 否 |
-| `02-nginx-gateway` | 排查 Nginx 生产配置漂移 | 2/3 | 否 |
+| `02-nginx-gateway` | 排查 Nginx 生产配置漂移 | 2/4 | 否 |
 | `04-python-web-research` | 联网核验 Python 官方文档 | — | **是** |
 | `05-routemap` | 13 个文件的跨模块排障（33 项测试） | 0/3，建议配合 `/rwkv-subagent` | 推荐配置 |
 | `03-warehouse-reconcile` | CSV 数据清洗 + SQLite 对账报表 | 0/3，挑战题 | 否 |
